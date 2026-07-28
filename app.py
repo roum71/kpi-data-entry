@@ -87,15 +87,48 @@ def is_percentage_unit(unit_id):
     except (ValueError, TypeError):
         return False
 
-def validate_and_clean_data(df, kpi_unit_map=None):
+def merge_units_metadata(df, uploaded_file):
+    """
+    Reads the 'Units' sheet and directly attaches 'unit_id' to every row in df
+    matching by kpi_code prior to exporting.
+    """
+    df_merged = df.copy()
+    try:
+        excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
+        if "Units" in excel_file.sheet_names:
+            units_df = pd.read_excel(uploaded_file, sheet_name="Units", engine="openpyxl")
+            units_df.columns = [clean_header(c) for c in units_df.columns]
+            
+            code_col = get_col_name(units_df, CODE_ALIASES)
+            unit_col = get_col_name(units_df, UNIT_ALIASES)
+
+            if code_col and unit_col:
+                unit_map = dict(zip(units_df[code_col].astype(str).str.strip(), units_df[unit_col]))
+                
+                main_code_col = get_col_name(df_merged, CODE_ALIASES)
+                main_unit_col = get_col_name(df_merged, UNIT_ALIASES)
+                
+                if main_code_col:
+                    mapped_units = df_merged[main_code_col].astype(str).str.strip().map(unit_map)
+                    if main_unit_col:
+                        df_merged[main_unit_col] = df_merged[main_unit_col].fillna(mapped_units)
+                    else:
+                        df_merged["unit_id"] = mapped_units
+    except Exception:
+        pass
+        
+    return df_merged
+
+def validate_and_clean_data(df, uploaded_file=None):
     """
     Validates rules, enforces locked months (wiping disallowed entries), 
     and handles percentage standardizations (80 -> 0.8).
     """
-    if kpi_unit_map is None:
-        kpi_unit_map = {}
-
     cleaned_df = df.copy()
+    
+    if uploaded_file is not None:
+        cleaned_df = merge_units_metadata(cleaned_df, uploaded_file)
+
     errors = []
     cleared_count = 0
 
@@ -104,10 +137,6 @@ def validate_and_clean_data(df, kpi_unit_map=None):
         unit_id = get_col_val(row, UNIT_ALIASES)
         kpi_code = get_col_val(row, CODE_ALIASES, "")
         kpi_name = get_col_val(row, NAME_ALIASES, "")
-
-        # Fallback to map if unit_id missing on row
-        if (unit_id is None or pd.isna(unit_id)) and kpi_code in kpi_unit_map:
-            unit_id = kpi_unit_map[kpi_code]
 
         allow_negative = get_col_val(row, NEG_ALIASES, 0)
         valid_months = get_valid_months(frequency)
@@ -191,16 +220,19 @@ def validate_and_clean_data(df, kpi_unit_map=None):
 
     return cleaned_df, errors, cleared_count
 
-def generate_formatted_excel(df, uploaded_file, target_sheet_name, kpi_unit_map):
+def generate_formatted_excel(df, uploaded_file, target_sheet_name):
     """
-    Exports dataset to .xlsx, ensures numbers are strictly stored as float values,
-    and applies openpyxl number_format (0.00% or #,##0.00).
+    Exports dataset to .xlsx, ensuring internal unit_id is evaluated 
+    and cell values are saved as pure Python floats for openpyxl formatting.
     """
     output_xlsx = io.BytesIO()
     excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
 
+    # Internal merge unit_id into df first
+    df_to_export = merge_units_metadata(df, uploaded_file)
+
     with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name=target_sheet_name, index=False)
+        df_to_export.to_excel(writer, sheet_name=target_sheet_name, index=False)
         for sheet in excel_file.sheet_names:
             if sheet != target_sheet_name:
                 other_df = pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
@@ -212,14 +244,8 @@ def generate_formatted_excel(df, uploaded_file, target_sheet_name, kpi_unit_map)
     wb = openpyxl.load_workbook(output_xlsx)
     ws = wb[target_sheet_name]
 
-    headers = [cell.value for cell in ws[1]]
-    code_col_idx = None
+    headers = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
     unit_col_idx = None
-
-    for alias in CODE_ALIASES:
-        if alias in headers:
-            code_col_idx = headers.index(alias) + 1
-            break
 
     for alias in UNIT_ALIASES:
         if alias in headers:
@@ -227,31 +253,28 @@ def generate_formatted_excel(df, uploaded_file, target_sheet_name, kpi_unit_map)
             break
 
     for row_idx in range(2, ws.max_row + 1):
-        unit_id = ws.cell(row=row_idx, column=unit_col_idx).value if unit_col_idx else None
-        
-        # Fallback to map lookup
-        if (unit_id is None or pd.isna(unit_id)) and code_col_idx:
-            kpi_code_val = ws.cell(row=row_idx, column=code_col_idx).value
-            unit_id = kpi_unit_map.get(kpi_code_val, None)
-
-        is_pct = is_percentage_unit(unit_id)
+        unit_id_val = ws.cell(row=row_idx, column=unit_col_idx).value if unit_col_idx else None
+        is_pct = is_percentage_unit(unit_id_val)
 
         for m_str in MONTH_COLUMNS:
             if m_str in headers:
                 col_idx = headers.index(m_str) + 1
                 cell = ws.cell(row=row_idx, column=col_idx)
 
-                if cell.value is not None and str(cell.value).strip() != "" and str(cell.value).lower() != "none":
-                    try:
-                        num_val = float(cell.value)
-                        cell.value = num_val  # Store as numeric float
-                        
-                        if is_pct:
-                            cell.number_format = '0.00%'  # Formats 0.8 as 80.00%
-                        else:
-                            cell.number_format = '#,##0.00' # Standard numeric format
-                    except (ValueError, TypeError):
-                        pass
+                if cell.value is None or str(cell.value).strip() == "" or str(cell.value).lower() == "none":
+                    cell.value = None
+                    continue
+
+                try:
+                    numeric_val = float(cell.value)
+                    cell.value = numeric_val  # Store as native float
+
+                    if is_pct:
+                        cell.number_format = '0.00%'  # Formats 0.8 as 80.00%
+                    else:
+                        cell.number_format = '#,##0.00' # Standard numeric format
+                except (ValueError, TypeError):
+                    pass
 
     final_output = io.BytesIO()
     wb.save(final_output)
@@ -268,25 +291,12 @@ if uploaded_file is not None:
         excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
         target_sheet = SHEET_NAME if SHEET_NAME in excel_file.sheet_names else excel_file.sheet_names[0]
 
-        # Extract KPI Unit Map from 'Units' sheet if available
-        kpi_unit_map = {}
-        if "Units" in excel_file.sheet_names:
-            try:
-                units_df = pd.read_excel(uploaded_file, sheet_name="Units", engine="openpyxl")
-                units_df.columns = [clean_header(c) for c in units_df.columns]
-                c_col = get_col_name(units_df, CODE_ALIASES)
-                u_col = get_col_name(units_df, UNIT_ALIASES)
-                if c_col and u_col:
-                    kpi_unit_map = dict(zip(units_df[c_col], units_df[u_col]))
-            except Exception:
-                pass
-
         # Load file into Session State
         if "master_df" not in st.session_state or st.session_state.get("file_name") != uploaded_file.name:
             df_raw = pd.read_excel(uploaded_file, sheet_name=target_sheet, engine="openpyxl")
             df_raw.columns = [clean_header(col) for col in df_raw.columns]
             
-            cleaned_master, _, _ = validate_and_clean_data(df_raw, kpi_unit_map)
+            cleaned_master, _, _ = validate_and_clean_data(df_raw, uploaded_file)
             st.session_state["master_df"] = cleaned_master
             st.session_state["file_name"] = uploaded_file.name
             st.session_state["editor_version"] = 0
@@ -355,7 +365,7 @@ if uploaded_file is not None:
         )
 
         # Validate edits submitted through editor
-        cleaned_edited_df, edit_errors, cleared_count = validate_and_clean_data(edited_df, kpi_unit_map)
+        cleaned_edited_df, edit_errors, cleared_count = validate_and_clean_data(edited_df, uploaded_file)
 
         # Update state and force rerun if changes/clears occurred
         if cleared_count > 0 or not cleaned_edited_df.equals(working_df):
@@ -394,7 +404,7 @@ if uploaded_file is not None:
             st.markdown("### **Option 1: Complete Workbook (`.xlsx`)**")
             st.write("Preserves all sheets (`Entry`, `Units`, etc.) and formats percentages as `0.00%` directly in Excel.")
 
-            output_xlsx_data = generate_formatted_excel(df, uploaded_file, target_sheet, kpi_unit_map)
+            output_xlsx_data = generate_formatted_excel(df, uploaded_file, target_sheet)
             download_name_xlsx = uploaded_file.name.rsplit('.', 1)[0] + "_updated.xlsx"
 
             st.download_button(
