@@ -49,6 +49,13 @@ def get_col_val(row, aliases, default=None):
             return row[name]
     return default
 
+def get_col_name(df, aliases):
+    """Returns the actual matching column name present in a DataFrame."""
+    for col in df.columns:
+        if col in aliases:
+            return col
+    return None
+
 def get_valid_months(frequency):
     """
     Frequency Mapping:
@@ -80,11 +87,14 @@ def is_percentage_unit(unit_id):
     except (ValueError, TypeError):
         return False
 
-def validate_and_clean_data(df):
+def validate_and_clean_data(df, kpi_unit_map=None):
     """
     Validates rules, enforces locked months (wiping disallowed entries), 
     and handles percentage standardizations (80 -> 0.8).
     """
+    if kpi_unit_map is None:
+        kpi_unit_map = {}
+
     cleaned_df = df.copy()
     errors = []
     cleared_count = 0
@@ -92,10 +102,14 @@ def validate_and_clean_data(df):
     for index, row in cleaned_df.iterrows():
         frequency = get_col_val(row, FREQ_ALIASES)
         unit_id = get_col_val(row, UNIT_ALIASES)
-        allow_negative = get_col_val(row, NEG_ALIASES, 0)
         kpi_code = get_col_val(row, CODE_ALIASES, "")
         kpi_name = get_col_val(row, NAME_ALIASES, "")
 
+        # Fallback to map if unit_id missing on row
+        if (unit_id is None or pd.isna(unit_id)) and kpi_code in kpi_unit_map:
+            unit_id = kpi_unit_map[kpi_code]
+
+        allow_negative = get_col_val(row, NEG_ALIASES, 0)
         valid_months = get_valid_months(frequency)
         is_pct = is_percentage_unit(unit_id)
 
@@ -106,7 +120,7 @@ def validate_and_clean_data(df):
 
             value = row[month_col]
 
-            # 1. STRICT MONTH LOCKING (Clears data entered in non-valid months)
+            # 1. STRICT MONTH LOCKING
             if month_num not in valid_months:
                 if pd.notna(value) and str(value).strip() != "" and str(value).strip().lower() != "none":
                     errors.append({
@@ -177,8 +191,11 @@ def validate_and_clean_data(df):
 
     return cleaned_df, errors, cleared_count
 
-def generate_formatted_excel(df, uploaded_file, target_sheet_name):
-    """Exports dataset to .xlsx and applies openpyxl number_format (0.00% or #,##0.00)."""
+def generate_formatted_excel(df, uploaded_file, target_sheet_name, kpi_unit_map):
+    """
+    Exports dataset to .xlsx, ensures numbers are strictly stored as float values,
+    and applies openpyxl number_format (0.00% or #,##0.00).
+    """
     output_xlsx = io.BytesIO()
     excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
 
@@ -191,12 +208,19 @@ def generate_formatted_excel(df, uploaded_file, target_sheet_name):
 
     output_xlsx.seek(0)
 
-    # Apply openpyxl cell formatting
+    # Apply openpyxl cell formatting with strict float casting
     wb = openpyxl.load_workbook(output_xlsx)
     ws = wb[target_sheet_name]
 
     headers = [cell.value for cell in ws[1]]
+    code_col_idx = None
     unit_col_idx = None
+
+    for alias in CODE_ALIASES:
+        if alias in headers:
+            code_col_idx = headers.index(alias) + 1
+            break
+
     for alias in UNIT_ALIASES:
         if alias in headers:
             unit_col_idx = headers.index(alias) + 1
@@ -204,6 +228,12 @@ def generate_formatted_excel(df, uploaded_file, target_sheet_name):
 
     for row_idx in range(2, ws.max_row + 1):
         unit_id = ws.cell(row=row_idx, column=unit_col_idx).value if unit_col_idx else None
+        
+        # Fallback to map lookup
+        if (unit_id is None or pd.isna(unit_id)) and code_col_idx:
+            kpi_code_val = ws.cell(row=row_idx, column=code_col_idx).value
+            unit_id = kpi_unit_map.get(kpi_code_val, None)
+
         is_pct = is_percentage_unit(unit_id)
 
         for m_str in MONTH_COLUMNS:
@@ -211,11 +241,17 @@ def generate_formatted_excel(df, uploaded_file, target_sheet_name):
                 col_idx = headers.index(m_str) + 1
                 cell = ws.cell(row=row_idx, column=col_idx)
 
-                if cell.value is not None and cell.value != "":
-                    if is_pct:
-                        cell.number_format = '0.00%'
-                    else:
-                        cell.number_format = '#,##0.00'
+                if cell.value is not None and str(cell.value).strip() != "" and str(cell.value).lower() != "none":
+                    try:
+                        num_val = float(cell.value)
+                        cell.value = num_val  # Store as numeric float
+                        
+                        if is_pct:
+                            cell.number_format = '0.00%'  # Formats 0.8 as 80.00%
+                        else:
+                            cell.number_format = '#,##0.00' # Standard numeric format
+                    except (ValueError, TypeError):
+                        pass
 
     final_output = io.BytesIO()
     wb.save(final_output)
@@ -232,13 +268,25 @@ if uploaded_file is not None:
         excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
         target_sheet = SHEET_NAME if SHEET_NAME in excel_file.sheet_names else excel_file.sheet_names[0]
 
-        # Load file once into Session State
+        # Extract KPI Unit Map from 'Units' sheet if available
+        kpi_unit_map = {}
+        if "Units" in excel_file.sheet_names:
+            try:
+                units_df = pd.read_excel(uploaded_file, sheet_name="Units", engine="openpyxl")
+                units_df.columns = [clean_header(c) for c in units_df.columns]
+                c_col = get_col_name(units_df, CODE_ALIASES)
+                u_col = get_col_name(units_df, UNIT_ALIASES)
+                if c_col and u_col:
+                    kpi_unit_map = dict(zip(units_df[c_col], units_df[u_col]))
+            except Exception:
+                pass
+
+        # Load file into Session State
         if "master_df" not in st.session_state or st.session_state.get("file_name") != uploaded_file.name:
             df_raw = pd.read_excel(uploaded_file, sheet_name=target_sheet, engine="openpyxl")
             df_raw.columns = [clean_header(col) for col in df_raw.columns]
             
-            # Initial validation pass to clean uploaded file
-            cleaned_master, _, _ = validate_and_clean_data(df_raw)
+            cleaned_master, _, _ = validate_and_clean_data(df_raw, kpi_unit_map)
             st.session_state["master_df"] = cleaned_master
             st.session_state["file_name"] = uploaded_file.name
             st.session_state["editor_version"] = 0
@@ -256,7 +304,7 @@ if uploaded_file is not None:
             freq_options = ["All Frequencies", "1 - Monthly", "2 - Quarterly", "3 - Semi-Annual", "4 - Annual"]
             selected_freq_str = st.selectbox("Filter by Frequency (Locks non-applicable months)", freq_options)
 
-        # Apply filters
+        # Apply Filters
         working_df = df.copy()
         if selected_year:
             working_df = working_df[working_df["year"].astype(str) == str(selected_year)]
@@ -264,24 +312,20 @@ if uploaded_file is not None:
         selected_freq_num = None
         if selected_freq_str != "All Frequencies":
             selected_freq_num = int(selected_freq_str.split(" - ")[0])
-            
-            # Filter working dataframe by frequency if column exists
-            for f_alias in FREQ_ALIASES:
-                if f_alias in working_df.columns:
-                    working_df = working_df[working_df[f_alias].astype(str).str.startswith(str(selected_freq_num))]
-                    break
+            freq_col_name = get_col_name(working_df, FREQ_ALIASES)
+            if freq_col_name:
+                working_df = working_df[working_df[freq_col_name].astype(str).str.startswith(str(selected_freq_num))]
 
         st.subheader("📝 Edit KPI Data")
-        st.caption("🔒 Invalid month cells are automatically disabled in the UI or instantly wiped if entered.")
+        st.caption("🔒 Invalid month cells are automatically disabled or wiped instantly if entered.")
 
         # Dynamic Column Config for Editor
         column_configs = {}
-        for alias in ["kpi_code", "KPI Code", "location_id", "year", "Freq", "measurement_frequency", "KPI Name (AR)", "kpi_name_ar"]:
+        for alias in ["kpi_code", "KPI Code", "location_id", "year", "Freq", "measurement_frequency", "KPI Name (AR)", "kpi_name_ar", "Unit", "unit_id"]:
             if alias in working_df.columns:
                 column_configs[alias] = st.column_config.TextColumn(disabled=True)
 
-        # Set Month Column Disabling Rules
-        # If user selected a specific frequency filter, physically disable invalid month columns in UI!
+        # Set UI Month Disabling Rules
         if selected_freq_num is not None:
             allowed_months = get_valid_months(selected_freq_num)
         else:
@@ -310,17 +354,12 @@ if uploaded_file is not None:
             key=editor_key
         )
 
-        # Validate edits submitted through the data editor
-        cleaned_edited_df, edit_errors, cleared_count = validate_and_clean_data(edited_df)
+        # Validate edits submitted through editor
+        cleaned_edited_df, edit_errors, cleared_count = validate_and_clean_data(edited_df, kpi_unit_map)
 
-        # IF INVALID DATA WAS ENTERED: Merge back, update master state, and RERUN to update screen instantly!
+        # Update state and force rerun if changes/clears occurred
         if cleared_count > 0 or not cleaned_edited_df.equals(working_df):
-            # Update master dataframe
-            code_col = get_col_name = None
-            for c_alias in CODE_ALIASES:
-                if c_alias in df.columns:
-                    code_col = c_alias
-                    break
+            code_col = get_col_name(df, CODE_ALIASES)
 
             if code_col:
                 for idx, row in cleaned_edited_df.iterrows():
@@ -333,7 +372,6 @@ if uploaded_file is not None:
 
             st.session_state["master_df"] = df
 
-            # If invalid values were wiped, trigger an immediate UI rerun to clear screen instantly!
             if cleared_count > 0:
                 st.session_state["editor_version"] += 1
                 st.warning(f"⚠️ {cleared_count} invalid or locked month entry(ies) were wiped.")
@@ -351,12 +389,12 @@ if uploaded_file is not None:
 
         col1, col2 = st.columns(2)
 
-        # OPTION 1: Clean Excel (.xlsx) with Formatted Cells & All Sheets
+        # OPTION 1: Clean Excel (.xlsx) with Formatted Cells & All Sheets Preserved
         with col1:
             st.markdown("### **Option 1: Complete Workbook (`.xlsx`)**")
             st.write("Preserves all sheets (`Entry`, `Units`, etc.) and formats percentages as `0.00%` directly in Excel.")
 
-            output_xlsx_data = generate_formatted_excel(df, uploaded_file, target_sheet)
+            output_xlsx_data = generate_formatted_excel(df, uploaded_file, target_sheet, kpi_unit_map)
             download_name_xlsx = uploaded_file.name.rsplit('.', 1)[0] + "_updated.xlsx"
 
             st.download_button(
