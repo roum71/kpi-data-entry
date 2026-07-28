@@ -15,7 +15,7 @@ st.set_page_config(
 )
 
 st.title("📊 KPI Data Entry System")
-st.write("Upload your Excel file (`Actual10.xlsm`), edit KPI entries with automated month-locking, and export your cleaned workbook.")
+st.write("Upload your KPI Excel file, edit month entries with automated validation, and export your cleaned workbook.")
 
 # ============================================================
 # CONSTANTS & COLUMN ALIASES
@@ -136,7 +136,7 @@ def merge_units_metadata(df, uploaded_file):
 def validate_and_clean_data(df, uploaded_file=None):
     """
     Validates rules, enforces locked months (wiping disallowed entries), 
-    and handles percentage standardizations (80 -> 0.8).
+    and checks allow_negative_values controls (allow_negative == 1 -> allowed, else blocked).
     """
     cleaned_df = df.copy()
     
@@ -153,7 +153,13 @@ def validate_and_clean_data(df, uploaded_file=None):
         kpi_code = get_col_val(row, CODE_ALIASES, "")
         kpi_name = get_col_val(row, NAME_ALIASES, "")
 
-        allow_negative = get_col_val(row, NEG_ALIASES, 0)
+        # Read allow_negative_values flag
+        allow_neg_val = get_col_val(row, NEG_ALIASES, 0)
+        try:
+            is_neg_allowed = int(float(allow_neg_val)) == 1
+        except (ValueError, TypeError):
+            is_neg_allowed = False
+
         valid_months = get_valid_months(frequency)
         is_pct = is_percentage_unit(unit_id, unit_name)
 
@@ -164,7 +170,7 @@ def validate_and_clean_data(df, uploaded_file=None):
 
             value = row[month_col]
 
-            # 1. STRICT MONTH LOCKING
+            # 1. STRICT MONTH LOCKING BY FREQUENCY
             if month_num not in valid_months:
                 if pd.notna(value) and str(value).strip() != "" and str(value).strip().lower() != "none":
                     errors.append({
@@ -185,41 +191,42 @@ def validate_and_clean_data(df, uploaded_file=None):
                 cleaned_df.loc[index, month_col] = np.nan
                 continue
 
-            # 2. NUMERIC & PERCENTAGE CONVERSION LOGIC
+            # 2. NUMERIC & NEGATIVE CONTROL VALIDATION
             try:
                 val_float = float(value)
 
+                # Check Negative Entry Control Rule
+                if val_float < 0.0 and not is_neg_allowed:
+                    errors.append({
+                        "kpi_code": kpi_code,
+                        "kpi_name_ar": kpi_name,
+                        "Month": month_col,
+                        "Value": value,
+                        "Error": "Negative values NOT allowed for this KPI (allow_negative_values != 1). Value cleared."
+                    })
+                    cleaned_df.loc[index, month_col] = np.nan
+                    cleared_count += 1
+                    continue
+
+                # Percentage conversions (e.g. 80 -> 0.8)
                 if is_pct:
                     if 1.0 < val_float <= 100.0:
                         val_float = val_float / 100.0
 
-                    if val_float < 0.0 or val_float > 1.0:
+                    if (val_float < 0.0 and not is_neg_allowed) or val_float > 1.0:
                         errors.append({
                             "kpi_code": kpi_code,
                             "kpi_name_ar": kpi_name,
                             "Month": month_col,
                             "Value": value,
-                            "Error": "Percentage must be between 0% and 100% (or 0 and 1). Value cleared."
+                            "Error": "Percentage out of range. Value cleared."
                         })
                         cleaned_df.loc[index, month_col] = np.nan
                         cleared_count += 1
                     else:
                         cleaned_df.loc[index, month_col] = val_float
-
                 else:
-                    min_val = -1000000000.0 if str(allow_negative).strip() == "1" else 0.0
-                    if val_float < min_val:
-                        errors.append({
-                            "kpi_code": kpi_code,
-                            "kpi_name_ar": kpi_name,
-                            "Month": month_col,
-                            "Value": value,
-                            "Error": f"Negative value not allowed (Min: {min_val}). Value cleared."
-                        })
-                        cleaned_df.loc[index, month_col] = np.nan
-                        cleared_count += 1
-                    else:
-                        cleaned_df.loc[index, month_col] = val_float
+                    cleaned_df.loc[index, month_col] = val_float
 
             except (ValueError, TypeError):
                 errors.append({
@@ -236,8 +243,7 @@ def validate_and_clean_data(df, uploaded_file=None):
 
 def generate_unformatted_excel(df, uploaded_file, target_sheet_name):
     """
-    Exports dataset to .xlsx directly as raw values, keeping original sheet structures
-    without applying custom openpyxl number formatting.
+    Exports dataset to .xlsx directly as raw values, keeping original sheet structures.
     """
     output_xlsx = io.BytesIO()
     excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
@@ -257,7 +263,7 @@ def generate_unformatted_excel(df, uploaded_file, target_sheet_name):
 # ============================================================
 # MAIN APPLICATION INTERFACE
 # ============================================================
-uploaded_file = st.file_uploader("Upload Excel File (`Actual10.xlsm`)", type=["xlsm", "xlsx", "xls"])
+uploaded_file = st.file_uploader("Upload Excel File", type=["xlsm", "xlsx", "xls"])
 
 if uploaded_file is not None:
     try:
@@ -300,29 +306,33 @@ if uploaded_file is not None:
                 working_df = working_df[working_df[freq_col_name].astype(str).str.startswith(str(selected_freq_num))]
 
         st.subheader("📝 Edit KPI Data")
-        st.caption("🔒 Invalid month cells are automatically disabled or wiped instantly if entered.")
+        st.caption("🔒 Non-month columns are locked. Negative values are blocked unless allow_negative_values = 1.")
 
-        # Dynamic Column Config for Editor (No number format specifications)
+        # ------------------------------------------------------------
+        # STRICT UI COLUMN LOCKING
+        # Lock ALL columns EXCEPT Month columns (1 to 12)
+        # ------------------------------------------------------------
         column_configs = {}
-        for alias in ["kpi_code", "KPI Code", "location_id", "year", "Freq", "measurement_frequency", "KPI Name (AR)", "kpi_name_ar", "Unit", "unit_id", "unit_name_ar"]:
-            if alias in working_df.columns:
-                column_configs[alias] = st.column_config.TextColumn(disabled=True)
+        for col in working_df.columns:
+            if col not in MONTH_COLUMNS:
+                column_configs[col] = st.column_config.TextColumn(disabled=True)
 
-        # Set UI Month Disabling Rules
+        # Configure Month Columns (Disable locked months based on Frequency)
         if selected_freq_num is not None:
             allowed_months = get_valid_months(selected_freq_num)
         else:
             allowed_months = list(range(1, 13))
 
         for m in MONTH_COLUMNS:
-            m_num = int(m)
-            is_disabled = m_num not in allowed_months
+            if m in working_df.columns:
+                m_num = int(m)
+                is_disabled = m_num not in allowed_months
 
-            column_configs[m] = st.column_config.NumberColumn(
-                label=f"Month {m}",
-                disabled=is_disabled,
-                help="Locked" if is_disabled else "Editable"
-            )
+                column_configs[m] = st.column_config.NumberColumn(
+                    label=f"Month {m}",
+                    disabled=is_disabled,
+                    help="Locked for Frequency" if is_disabled else "Editable Month Entry"
+                )
 
         # Render Data Editor with unique version key
         editor_key = f"kpi_editor_v_{st.session_state['editor_version']}"
@@ -350,13 +360,14 @@ if uploaded_file is not None:
                     if selected_year and "year" in df.columns:
                         mask = mask & (df["year"].astype(str) == str(selected_year))
                     for m in MONTH_COLUMNS:
-                        df.loc[mask, m] = row[m]
+                        if m in df.columns:
+                            df.loc[mask, m] = row[m]
 
             st.session_state["master_df"] = df
 
             if cleared_count > 0:
                 st.session_state["editor_version"] += 1
-                st.warning(f"⚠️ {cleared_count} invalid or locked month entry(ies) were wiped.")
+                st.warning(f"⚠️ {cleared_count} invalid or disallowed entry(ies) were wiped.")
                 st.rerun()
 
         if edit_errors:
@@ -371,10 +382,10 @@ if uploaded_file is not None:
 
         col1, col2 = st.columns(2)
 
-        # OPTION 1: Excel (.xlsx) with Raw Values & All Sheets Preserved
+        # OPTION 1: Excel (.xlsx)
         with col1:
             st.markdown("### **Option 1: Complete Workbook (`.xlsx`)**")
-            st.write("Preserves all sheets (`Entry`, `Units`, etc.) with raw numeric values.")
+            st.write("Preserves all original sheets (`Entry`, `Units`, etc.) with raw validated numbers.")
 
             output_xlsx_data = generate_unformatted_excel(df, uploaded_file, target_sheet)
             download_name_xlsx = uploaded_file.name.rsplit('.', 1)[0] + "_updated.xlsx"
@@ -391,14 +402,14 @@ if uploaded_file is not None:
         # OPTION 2: Entry Sheet CSV
         with col2:
             st.markdown("### **Option 2: Data Table Only (`.csv`)**")
-            st.write("Exports only the cleaned `Entry` sheet with UTF-8 encoding (Arabic language safe). Best for **Power Query**.")
+            st.write("Exports only the cleaned `Entry` sheet with UTF-8 encoding (Arabic language safe).")
 
             output_csv = df.to_csv(index=False).encode('utf-8-sig')
 
             st.download_button(
                 label="⬇️ Download CSV (.csv)",
                 data=output_csv,
-                file_name="Actual10_Entry_updated.csv",
+                file_name="Entry_updated.csv",
                 mime="text/csv",
                 use_container_width=True
             )
@@ -407,4 +418,4 @@ if uploaded_file is not None:
         st.error("An error occurred while processing the Excel workbook.")
         st.exception(e)
 else:
-    st.info("👆 Please upload your `Actual10.xlsm` file to get started.")
+    st.info("👆 Please upload your Excel file to get started.")
