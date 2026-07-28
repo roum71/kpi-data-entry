@@ -33,9 +33,10 @@ REQUIRED_COLUMNS = [
 SHEET_NAME = "Entry"
 
 # ============================================================
-# HELPER FUNCTIONS
+# HELPER FUNCTIONS (Aligned with VBA Logic)
 # ============================================================
 def clean_header(header_name):
+    """Cleans column headers to match Power Query standards."""
     if header_name is None:
         return ""
     header_str = str(header_name)
@@ -44,6 +45,13 @@ def clean_header(header_name):
     return header_str.strip()
 
 def get_valid_months(frequency):
+    """
+    Frequency mapping matching VBA ColorByFrequency logic:
+    1 = Monthly     -> [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    2 = Quarterly   -> [3, 6, 9, 12]
+    3 = Semi-Annual -> [6, 12]
+    4 = Annual      -> [12]
+    """
     try:
         freq = int(float(frequency))
     except (ValueError, TypeError):
@@ -60,27 +68,34 @@ def get_valid_months(frequency):
     
     return []
 
-def is_numeric(value):
-    if pd.isna(value) or str(value).strip() == "":
-        return True
+def is_percentage_unit(unit_id):
+    """Matches VBA IsPercentageUnit function (Unit IDs 10, 11, 12)."""
     try:
-        float(value)
-        return True
+        u_id = int(float(unit_id))
+        return u_id in [10, 11, 12]
     except (ValueError, TypeError):
         return False
 
 def validate_and_clean_data(df):
     """
-    Validates data against frequency rules and numeric rules.
-    If an error is found, the value is cleared (set to None/NaN) 
-    so it is NEVER saved in the output file.
+    Validates data against frequency, negative value allowance, and percentage limits.
+    Matches VBA ApplyFormatAndValidation rules.
+    Invalid inputs are automatically CLEARED (set to NaN) to protect saved file integrity.
     """
     cleaned_df = df.copy()
     errors = []
 
     for index, row in cleaned_df.iterrows():
         frequency = row.get("measurement_frequency", None)
+        unit_id = row.get("unit_id", None)
+        allow_negative = row.get("allow_negative_values", 0)
+
         valid_months = get_valid_months(frequency)
+        is_pct = is_percentage_unit(unit_id)
+
+        # Min value rule from VBA: if allow_negative == 1 -> -1 Billion, else 0
+        min_val = -1000000000.0 if str(allow_negative).strip() == "1" else 0.0
+        max_val = 1.0 if is_pct else 1000000000.0
 
         for month_num in range(1, 13):
             month_col = str(month_num)
@@ -89,12 +104,12 @@ def validate_and_clean_data(df):
 
             value = row[month_col]
 
-            # If empty/blank, leave as is
+            # Leave empty cells untouched
             if pd.isna(value) or str(value).strip() == "":
                 cleaned_df.loc[index, month_col] = np.nan
                 continue
 
-            # Check Periodicity Rule
+            # 1. Check Periodicity/Frequency Rule
             if month_num not in valid_months:
                 errors.append({
                     "kpi_code": row.get("kpi_code", ""),
@@ -103,12 +118,27 @@ def validate_and_clean_data(df):
                     "Value": value,
                     "Error": f"Month {month_col} not allowed for frequency {frequency} (CLEARED)"
                 })
-                # CLEAR THE INVALID VALUE
                 cleaned_df.loc[index, month_col] = np.nan
                 continue
 
-            # Check Numeric Rule
-            if not is_numeric(value):
+            # 2. Check Numeric & Range Rule
+            try:
+                val_float = float(value)
+                
+                if val_float < min_val or val_float > max_val:
+                    err_msg = "Percentage must be between 0 and 1" if is_pct else f"Value must be >= {min_val}"
+                    errors.append({
+                        "kpi_code": row.get("kpi_code", ""),
+                        "kpi_name_ar": row.get("kpi_name_ar", ""),
+                        "Month": month_col,
+                        "Value": value,
+                        "Error": f"{err_msg} (CLEARED)"
+                    })
+                    cleaned_df.loc[index, month_col] = np.nan
+                else:
+                    cleaned_df.loc[index, month_col] = val_float
+
+            except (ValueError, TypeError):
                 errors.append({
                     "kpi_code": row.get("kpi_code", ""),
                     "kpi_name_ar": row.get("kpi_name_ar", ""),
@@ -116,10 +146,7 @@ def validate_and_clean_data(df):
                     "Value": value,
                     "Error": "Value must be numeric (CLEARED)"
                 })
-                # CLEAR THE INVALID VALUE
                 cleaned_df.loc[index, month_col] = np.nan
-            else:
-                cleaned_df.loc[index, month_col] = float(value)
 
     return cleaned_df, errors
 
@@ -159,8 +186,18 @@ if uploaded_file is not None:
             selected_year = None
             working_df = df.copy()
 
+        # Formatting monthly display columns
+        column_configs = {}
+        for m in MONTH_COLUMNS:
+            column_configs[m] = st.column_config.NumberColumn(
+                label=f"Month {m}",
+                format="%.2f",
+                help="Enter numeric values"
+            )
+
         edited_df = st.data_editor(
             working_df,
+            column_config=column_configs,
             use_container_width=True,
             hide_index=True,
             num_rows="fixed"
@@ -170,7 +207,7 @@ if uploaded_file is not None:
         cleaned_edited_df, edit_errors = validate_and_clean_data(edited_df)
 
         if edit_errors:
-            st.warning(f"⚠️ {len(edit_errors)} invalid entries detected. They have been automatically cleared and will NOT be saved.")
+            st.warning(f"⚠️ {len(edit_errors)} invalid entries detected. They have been automatically cleared to protect data integrity.")
             with st.expander("View cleared invalid entries"):
                 st.dataframe(pd.DataFrame(edit_errors), use_container_width=True)
         else:
@@ -187,46 +224,57 @@ if uploaded_file is not None:
         else:
             df = cleaned_edited_df
 
-        # Final pass to ensure whole dataframe is clean before download
+        # Final cleaning pass on master dataframe before export
         df, _ = validate_and_clean_data(df)
 
         # ============================================================
         # DOWNLOAD SECTION
         # ============================================================
         st.markdown("---")
-        st.subheader("💾 Export Options")
+        st.subheader("💾 Choose Your Download Format")
 
         col1, col2 = st.columns(2)
 
-        # Option 1: Download as updated .xlsm file
+        # OPTION 1: Full Excel Workbook (.xlsx)
         with col1:
-            output_excel = io.BytesIO()
-            with pd.ExcelWriter(output_excel, engine="openpyxl") as writer:
+            st.markdown("### **Option 1: Complete Workbook (`.xlsx`)**")
+            st.write("Preserves all sheets (`Entry`, `Units`, `extended`, `Locker`) in a single clean Excel file.")
+
+            output_xlsx = io.BytesIO()
+            with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
+                # Write updated Entry sheet
                 df.to_excel(writer, sheet_name=target_sheet, index=False)
+                
+                # Copy all other reference sheets untouched
                 for sheet in excel_file.sheet_names:
                     if sheet != target_sheet:
                         other_df = pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
                         other_df.to_excel(writer, sheet_name=sheet, index=False)
 
-            output_excel.seek(0)
+            output_xlsx.seek(0)
+            download_name_xlsx = uploaded_file.name.rsplit('.', 1)[0] + "_updated.xlsx"
 
             st.download_button(
-                label="⬇️ Download Updated Excel (.xlsm)",
-                data=output_excel,
-                file_name=f"Updated_{uploaded_file.name}",
-                mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                label="⬇️ Download Excel (.xlsx)",
+                data=output_xlsx,
+                file_name=download_name_xlsx,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
                 use_container_width=True
             )
 
-        # Option 2: Download as CSV file (Entry sheet only)
+        # OPTION 2: Entry Sheet Only (.csv)
         with col2:
-            output_csv = df.to_csv(index=False).encode('utf-8-sig') # utf-8-sig keeps Arabic characters readable in Excel
+            st.markdown("### **Option 2: Data Table Only (`.csv`)**")
+            st.write("Exports only the cleaned `Entry` sheet. Best for importing directly into **Power Query** or databases.")
+
+            # utf-8-sig ensures Arabic characters read correctly in Excel/Power Query
+            output_csv = df.to_csv(index=False).encode('utf-8-sig')
 
             st.download_button(
-                label="⬇️ Download Entry Sheet (.csv)",
+                label="⬇️ Download CSV (.csv)",
                 data=output_csv,
-                file_name="Actual10_Entry.csv",
+                file_name="Actual10_Entry_updated.csv",
                 mime="text/csv",
                 use_container_width=True
             )
