@@ -49,13 +49,13 @@ def get_valid_months(frequency):
     except (ValueError, TypeError):
         return []
 
-    if freq == 1:
+    if freq == 1:      # Monthly
         return list(range(1, 13))
-    elif freq == 2:
-        return [6, 12]
-    elif freq == 3:
+    elif freq == 2:    # Quarterly
         return [3, 6, 9, 12]
-    elif freq == 4:
+    elif freq == 3:    # Semi-Annual
+        return [6, 12]
+    elif freq == 4:    # Annual
         return [12]
     
     return []
