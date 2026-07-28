@@ -234,10 +234,10 @@ def validate_and_clean_data(df, uploaded_file=None):
 
     return cleaned_df, errors, cleared_count
 
-def generate_formatted_excel(df, uploaded_file, target_sheet_name):
+def generate_unformatted_excel(df, uploaded_file, target_sheet_name):
     """
-    Exports dataset to .xlsx, builds dynamic custom Excel number formats 
-    including textual unit suffixes (e.g. #,##0.00 "موظف").
+    Exports dataset to .xlsx directly as raw values, keeping original sheet structures
+    without applying custom openpyxl number formatting.
     """
     output_xlsx = io.BytesIO()
     excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
@@ -252,61 +252,7 @@ def generate_formatted_excel(df, uploaded_file, target_sheet_name):
                 other_df.to_excel(writer, sheet_name=sheet, index=False)
 
     output_xlsx.seek(0)
-
-    # Apply openpyxl cell formatting with dynamic unit suffixes
-    wb = openpyxl.load_workbook(output_xlsx)
-    ws = wb[target_sheet_name]
-
-    headers = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
-    
-    unit_col_idx = None
-    unit_name_col_idx = None
-
-    for alias in UNIT_ALIASES:
-        if alias in headers:
-            unit_col_idx = headers.index(alias) + 1
-            break
-
-    for alias in UNIT_NAME_ALIASES:
-        if alias in headers:
-            unit_name_col_idx = headers.index(alias) + 1
-            break
-
-    for row_idx in range(2, ws.max_row + 1):
-        unit_id_val = ws.cell(row=row_idx, column=unit_col_idx).value if unit_col_idx else None
-        unit_name_val = ws.cell(row=row_idx, column=unit_name_col_idx).value if unit_name_col_idx else None
-
-        is_pct = is_percentage_unit(unit_id_val, unit_name_val)
-
-        # Build dynamic Excel number format string
-        if is_pct:
-            custom_format = '0.00%'
-        elif unit_name_val and str(unit_name_val).strip() not in ["عدد صحيح", "None", "nan"]:
-            unit_str = str(unit_name_val).strip()
-            custom_format = f'#,##0.00 "{unit_str}"'
-        else:
-            custom_format = '#,##0.00'
-
-        for m_str in MONTH_COLUMNS:
-            if m_str in headers:
-                col_idx = headers.index(m_str) + 1
-                cell = ws.cell(row=row_idx, column=col_idx)
-
-                if cell.value is None or str(cell.value).strip() == "" or str(cell.value).lower() == "none":
-                    cell.value = None
-                    continue
-
-                try:
-                    numeric_val = float(cell.value)
-                    cell.value = numeric_val  # Store as native float
-                    cell.number_format = custom_format # Apply dynamic custom format
-                except (ValueError, TypeError):
-                    pass
-
-    final_output = io.BytesIO()
-    wb.save(final_output)
-    final_output.seek(0)
-    return final_output
+    return output_xlsx
 
 # ============================================================
 # MAIN APPLICATION INTERFACE
@@ -356,7 +302,7 @@ if uploaded_file is not None:
         st.subheader("📝 Edit KPI Data")
         st.caption("🔒 Invalid month cells are automatically disabled or wiped instantly if entered.")
 
-        # Dynamic Column Config for Editor
+        # Dynamic Column Config for Editor (No number format specifications)
         column_configs = {}
         for alias in ["kpi_code", "KPI Code", "location_id", "year", "Freq", "measurement_frequency", "KPI Name (AR)", "kpi_name_ar", "Unit", "unit_id", "unit_name_ar"]:
             if alias in working_df.columns:
@@ -374,7 +320,6 @@ if uploaded_file is not None:
 
             column_configs[m] = st.column_config.NumberColumn(
                 label=f"Month {m}",
-                format="%.2f",
                 disabled=is_disabled,
                 help="Locked" if is_disabled else "Editable"
             )
@@ -426,12 +371,12 @@ if uploaded_file is not None:
 
         col1, col2 = st.columns(2)
 
-        # OPTION 1: Clean Excel (.xlsx) with Formatted Cells & All Sheets Preserved
+        # OPTION 1: Excel (.xlsx) with Raw Values & All Sheets Preserved
         with col1:
             st.markdown("### **Option 1: Complete Workbook (`.xlsx`)**")
-            st.write("Preserves all sheets (`Entry`, `Units`, etc.) and formats unit suffixes (e.g., `45.00 موظف`) directly in Excel.")
+            st.write("Preserves all sheets (`Entry`, `Units`, etc.) with raw numeric values.")
 
-            output_xlsx_data = generate_formatted_excel(df, uploaded_file, target_sheet)
+            output_xlsx_data = generate_unformatted_excel(df, uploaded_file, target_sheet)
             download_name_xlsx = uploaded_file.name.rsplit('.', 1)[0] + "_updated.xlsx"
 
             st.download_button(
@@ -443,7 +388,7 @@ if uploaded_file is not None:
                 use_container_width=True
             )
 
-        # OPTION 2: Entry Sheet CSV for Power Query
+        # OPTION 2: Entry Sheet CSV
         with col2:
             st.markdown("### **Option 2: Data Table Only (`.csv`)**")
             st.write("Exports only the cleaned `Entry` sheet with UTF-8 encoding (Arabic language safe). Best for **Power Query**.")
