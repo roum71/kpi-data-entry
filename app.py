@@ -24,6 +24,7 @@ MONTH_COLUMNS = [str(i) for i in range(1, 13)]
 
 FREQ_ALIASES = ["Freq", "measurement_frequency", "freq", "frequency", "التردد"]
 UNIT_ALIASES = ["Unit", "unit_id", "unit", "Unit ID", "unit_code"]
+UNIT_NAME_ALIASES = ["unit_name_ar", "Unit Name (AR)", "unit_name", "الوحدة"]
 NEG_ALIASES  = ["allow_negative_values", "Allow Negative", "allow_negative", "allow_neg"]
 CODE_ALIASES = ["kpi_code", "KPI Code", "code"]
 NAME_ALIASES = ["kpi_name_ar", "KPI Name (AR)", "kpi_name", "name_ar"]
@@ -79,8 +80,10 @@ def get_valid_months(frequency):
         return [12]
     return list(range(1, 13))
 
-def is_percentage_unit(unit_id):
-    """Checks if Unit ID is a percentage type (10, 11, 12)."""
+def is_percentage_unit(unit_id, unit_name=None):
+    """Checks if Unit ID is a percentage type (10, 11, 12) or name contains %."""
+    if unit_name and "%" in str(unit_name):
+        return True
     try:
         u_id = int(float(unit_id))
         return u_id in [10, 11, 12]
@@ -89,8 +92,8 @@ def is_percentage_unit(unit_id):
 
 def merge_units_metadata(df, uploaded_file):
     """
-    Reads the 'Units' sheet and directly attaches 'unit_id' to every row in df
-    matching by kpi_code prior to exporting.
+    Reads the 'Units' sheet and directly attaches 'unit_id' and 'unit_name_ar' 
+    to every row in df matching by kpi_code.
     """
     df_merged = df.copy()
     try:
@@ -101,19 +104,30 @@ def merge_units_metadata(df, uploaded_file):
             
             code_col = get_col_name(units_df, CODE_ALIASES)
             unit_col = get_col_name(units_df, UNIT_ALIASES)
+            unit_name_col = get_col_name(units_df, UNIT_NAME_ALIASES)
 
-            if code_col and unit_col:
-                unit_map = dict(zip(units_df[code_col].astype(str).str.strip(), units_df[unit_col]))
-                
+            if code_col:
                 main_code_col = get_col_name(df_merged, CODE_ALIASES)
-                main_unit_col = get_col_name(df_merged, UNIT_ALIASES)
-                
                 if main_code_col:
-                    mapped_units = df_merged[main_code_col].astype(str).str.strip().map(unit_map)
-                    if main_unit_col:
-                        df_merged[main_unit_col] = df_merged[main_unit_col].fillna(mapped_units)
-                    else:
-                        df_merged["unit_id"] = mapped_units
+                    clean_codes = units_df[code_col].astype(str).str.strip()
+
+                    if unit_col:
+                        unit_map = dict(zip(clean_codes, units_df[unit_col]))
+                        main_unit_col = get_col_name(df_merged, UNIT_ALIASES)
+                        mapped_units = df_merged[main_code_col].astype(str).str.strip().map(unit_map)
+                        if main_unit_col:
+                            df_merged[main_unit_col] = df_merged[main_unit_col].fillna(mapped_units)
+                        else:
+                            df_merged["unit_id"] = mapped_units
+
+                    if unit_name_col:
+                        name_map = dict(zip(clean_codes, units_df[unit_name_col]))
+                        main_name_col = get_col_name(df_merged, UNIT_NAME_ALIASES)
+                        mapped_names = df_merged[main_code_col].astype(str).str.strip().map(name_map)
+                        if main_name_col:
+                            df_merged[main_name_col] = df_merged[main_name_col].fillna(mapped_names)
+                        else:
+                            df_merged["unit_name_ar"] = mapped_names
     except Exception:
         pass
         
@@ -135,12 +149,13 @@ def validate_and_clean_data(df, uploaded_file=None):
     for index, row in cleaned_df.iterrows():
         frequency = get_col_val(row, FREQ_ALIASES)
         unit_id = get_col_val(row, UNIT_ALIASES)
+        unit_name = get_col_val(row, UNIT_NAME_ALIASES, "")
         kpi_code = get_col_val(row, CODE_ALIASES, "")
         kpi_name = get_col_val(row, NAME_ALIASES, "")
 
         allow_negative = get_col_val(row, NEG_ALIASES, 0)
         valid_months = get_valid_months(frequency)
-        is_pct = is_percentage_unit(unit_id)
+        is_pct = is_percentage_unit(unit_id, unit_name)
 
         for month_num in range(1, 13):
             month_col = str(month_num)
@@ -175,7 +190,6 @@ def validate_and_clean_data(df, uploaded_file=None):
                 val_float = float(value)
 
                 if is_pct:
-                    # Converts 80 -> 0.8 (80%)
                     if 1.0 < val_float <= 100.0:
                         val_float = val_float / 100.0
 
@@ -222,13 +236,12 @@ def validate_and_clean_data(df, uploaded_file=None):
 
 def generate_formatted_excel(df, uploaded_file, target_sheet_name):
     """
-    Exports dataset to .xlsx, ensuring internal unit_id is evaluated 
-    and cell values are saved as pure Python floats for openpyxl formatting.
+    Exports dataset to .xlsx, builds dynamic custom Excel number formats 
+    including textual unit suffixes (e.g. #,##0.00 "موظف").
     """
     output_xlsx = io.BytesIO()
     excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
 
-    # Internal merge unit_id into df first
     df_to_export = merge_units_metadata(df, uploaded_file)
 
     with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
@@ -240,21 +253,39 @@ def generate_formatted_excel(df, uploaded_file, target_sheet_name):
 
     output_xlsx.seek(0)
 
-    # Apply openpyxl cell formatting with strict float casting
+    # Apply openpyxl cell formatting with dynamic unit suffixes
     wb = openpyxl.load_workbook(output_xlsx)
     ws = wb[target_sheet_name]
 
     headers = [str(cell.value).strip() if cell.value is not None else "" for cell in ws[1]]
+    
     unit_col_idx = None
+    unit_name_col_idx = None
 
     for alias in UNIT_ALIASES:
         if alias in headers:
             unit_col_idx = headers.index(alias) + 1
             break
 
+    for alias in UNIT_NAME_ALIASES:
+        if alias in headers:
+            unit_name_col_idx = headers.index(alias) + 1
+            break
+
     for row_idx in range(2, ws.max_row + 1):
         unit_id_val = ws.cell(row=row_idx, column=unit_col_idx).value if unit_col_idx else None
-        is_pct = is_percentage_unit(unit_id_val)
+        unit_name_val = ws.cell(row=row_idx, column=unit_name_col_idx).value if unit_name_col_idx else None
+
+        is_pct = is_percentage_unit(unit_id_val, unit_name_val)
+
+        # Build dynamic Excel number format string
+        if is_pct:
+            custom_format = '0.00%'
+        elif unit_name_val and str(unit_name_val).strip() not in ["عدد صحيح", "None", "nan"]:
+            unit_str = str(unit_name_val).strip()
+            custom_format = f'#,##0.00 "{unit_str}"'
+        else:
+            custom_format = '#,##0.00'
 
         for m_str in MONTH_COLUMNS:
             if m_str in headers:
@@ -268,11 +299,7 @@ def generate_formatted_excel(df, uploaded_file, target_sheet_name):
                 try:
                     numeric_val = float(cell.value)
                     cell.value = numeric_val  # Store as native float
-
-                    if is_pct:
-                        cell.number_format = '0.00%'  # Formats 0.8 as 80.00%
-                    else:
-                        cell.number_format = '#,##0.00' # Standard numeric format
+                    cell.number_format = custom_format # Apply dynamic custom format
                 except (ValueError, TypeError):
                     pass
 
@@ -331,7 +358,7 @@ if uploaded_file is not None:
 
         # Dynamic Column Config for Editor
         column_configs = {}
-        for alias in ["kpi_code", "KPI Code", "location_id", "year", "Freq", "measurement_frequency", "KPI Name (AR)", "kpi_name_ar", "Unit", "unit_id"]:
+        for alias in ["kpi_code", "KPI Code", "location_id", "year", "Freq", "measurement_frequency", "KPI Name (AR)", "kpi_name_ar", "Unit", "unit_id", "unit_name_ar"]:
             if alias in working_df.columns:
                 column_configs[alias] = st.column_config.TextColumn(disabled=True)
 
@@ -402,7 +429,7 @@ if uploaded_file is not None:
         # OPTION 1: Clean Excel (.xlsx) with Formatted Cells & All Sheets Preserved
         with col1:
             st.markdown("### **Option 1: Complete Workbook (`.xlsx`)**")
-            st.write("Preserves all sheets (`Entry`, `Units`, etc.) and formats percentages as `0.00%` directly in Excel.")
+            st.write("Preserves all sheets (`Entry`, `Units`, etc.) and formats unit suffixes (e.g., `45.00 موظف`) directly in Excel.")
 
             output_xlsx_data = generate_formatted_excel(df, uploaded_file, target_sheet)
             download_name_xlsx = uploaded_file.name.rsplit('.', 1)[0] + "_updated.xlsx"
