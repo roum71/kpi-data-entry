@@ -83,20 +83,11 @@ def get_valid_months(frequency):
         return [12]
     return list(range(1, 13))
 
-def is_percentage_unit(unit_id, unit_name=None):
-    """Checks if Unit ID is a percentage type (10, 11, 12) or name contains %."""
-    if unit_name and "%" in str(unit_name):
-        return True
-    try:
-        u_id = int(float(unit_id))
-        return u_id in [10, 11, 12]
-    except (ValueError, TypeError):
-        return False
-
 def validate_and_clean_data(df):
     """
-    Validates rules, enforces locked months (wiping disallowed entries), 
+    Validates rules, enforces locked months (wiping disallowed entries),
     and checks allow_negative_values controls (allow_negative == 1 -> allowed, else blocked).
+    Keeps all numeric entries exactly as entered without scaling/division.
     """
     cleaned_df = df.copy()
     errors = []
@@ -104,8 +95,6 @@ def validate_and_clean_data(df):
 
     for index, row in cleaned_df.iterrows():
         frequency = get_col_val(row, FREQ_ALIASES)
-        unit_id = get_col_val(row, UNIT_ALIASES)
-        unit_name = get_col_val(row, UNIT_NAME_ALIASES, "")
         kpi_code = get_col_val(row, CODE_ALIASES, "")
         kpi_name = get_col_val(row, NAME_ALIASES, "")
 
@@ -116,7 +105,6 @@ def validate_and_clean_data(df):
             is_neg_allowed = False
 
         valid_months = get_valid_months(frequency)
-        is_pct = is_percentage_unit(unit_id, unit_name)
 
         for month_num in range(1, 13):
             month_col = str(month_num)
@@ -163,25 +151,8 @@ def validate_and_clean_data(df):
                     cleared_count += 1
                     continue
 
-                # Percentage conversions (e.g. 80 -> 0.8)
-                if is_pct:
-                    if 1.0 < val_float <= 100.0:
-                        val_float = val_float / 100.0
-
-                    if (val_float < 0.0 and not is_neg_allowed) or val_float > 1.0:
-                        errors.append({
-                            "kpi_code": kpi_code,
-                            "kpi_name_ar": kpi_name,
-                            "Month": month_col,
-                            "Value": value,
-                            "Error": "Percentage out of range. Value cleared."
-                        })
-                        cleaned_df.loc[index, month_col] = np.nan
-                        cleared_count += 1
-                    else:
-                        cleaned_df.loc[index, month_col] = val_float
-                else:
-                    cleaned_df.loc[index, month_col] = val_float
+                # Keep exact entered numeric value
+                cleaned_df.loc[index, month_col] = val_float
 
             except (ValueError, TypeError):
                 errors.append({
