@@ -4,6 +4,8 @@ import numpy as np
 import io
 import re
 import openpyxl
+import requests
+import msal
 
 # ============================================================
 # STREAMLIT CONFIGURATION
@@ -15,7 +17,7 @@ st.set_page_config(
 )
 
 st.title("📊 KPI Data Entry System")
-st.write("Upload your KPI Excel file, edit month entries with automated validation, and export your cleaned workbook.")
+st.write("Upload your KPI Excel file, edit month entries with automated validation, and export or save to SharePoint.")
 
 # ============================================================
 # CONSTANTS & COLUMN ALIASES
@@ -32,10 +34,64 @@ NAME_ALIASES = ["kpi_name_ar", "KPI Name (AR)", "kpi_name", "name_ar"]
 SHEET_NAME = "Entry"
 
 # ============================================================
+# DELEGATED SHAREPOINT AUTHENTICATION (NO ADMIN CONSENT NEEDED)
+# ============================================================
+def get_user_access_token():
+    """Authenticates using Microsoft Device Flow (No Admin Consent required)."""
+    cfg = st.secrets["sharepoint"]
+    client_id = cfg["client_id"]
+    tenant_id = cfg["tenant_id"]
+    
+    authority = f"https://login.microsoftonline.com/{tenant_id}"
+    scopes = ["https://graph.microsoft.com/Files.ReadWrite"]
+
+    app = msal.PublicClientApplication(client_id, authority=authority)
+    
+    # Check if user already logged in during this session
+    if "token_cache" in st.session_state:
+        accounts = app.get_accounts()
+        if accounts:
+            result = app.acquire_token_silent(scopes, account=accounts[0])
+            if result and "access_token" in result:
+                return result["access_token"]
+
+    # If not logged in, initiate device code login
+    flow = app.initiate_device_flow(scopes=scopes)
+    if "user_code" in flow:
+        st.warning(f"🔑 **SharePoint Login Required:** Go to [{flow['verification_uri']}]({flow['verification_uri']}) and enter code: **`{flow['user_code']}`**")
+        result = app.acquire_token_by_device_flow(flow)
+        if "access_token" in result:
+            st.session_state["token_cache"] = result
+            return result["access_token"]
+        else:
+            raise Exception("Failed to authenticate user.")
+    else:
+        raise Exception("Could not start device login flow.")
+
+def upload_to_sharepoint_as_user(file_bytes, file_name):
+    """Uploads file buffer to SharePoint using the user's logged-in session."""
+    token = get_user_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    cfg = st.secrets["sharepoint"]
+
+    # 1. Fetch SharePoint Site ID
+    site_url = f"https://graph.microsoft.com/v1.0/sites/{cfg['hostname']}:{cfg['site_path']}"
+    site_res = requests.get(site_url, headers=headers)
+    site_res.raise_for_status()
+    site_id = site_res.json()["id"]
+
+    # 2. Upload file to target folder
+    clean_folder_path = cfg["folder_path"].strip("/")
+    upload_url = f"https://graph.microsoft.com/v1.0/sites/{site_id}/drive/root:/{clean_folder_path}/{file_name}:/content"
+
+    upload_res = requests.put(upload_url, headers=headers, data=file_bytes.getvalue())
+    upload_res.raise_for_status()
+    return upload_res.json()
+
+# ============================================================
 # HELPER FUNCTIONS
 # ============================================================
 def clean_header(header_name):
-    """Cleans column headers to match standard field names."""
     if header_name is None:
         return ""
     header_str = str(header_name)
@@ -44,27 +100,18 @@ def clean_header(header_name):
     return header_str.strip()
 
 def get_col_val(row, aliases, default=None):
-    """Safely reads a column value using any of its supported header aliases."""
     for name in aliases:
         if name in row and pd.notna(row[name]):
             return row[name]
     return default
 
 def get_col_name(df, aliases):
-    """Returns the actual matching column name present in a DataFrame."""
     for col in df.columns:
         if col in aliases:
             return col
     return None
 
 def get_valid_months(frequency):
-    """
-    Frequency Mapping:
-    1 = Monthly     -> All months [1..12]
-    2 = Quarterly   -> [3, 6, 9, 12]
-    3 = Semi-Annual -> [6, 12]
-    4 = Annual      -> [12]
-    """
     try:
         freq = int(float(frequency))
     except (ValueError, TypeError):
@@ -81,7 +128,6 @@ def get_valid_months(frequency):
     return list(range(1, 13))
 
 def is_percentage_unit(unit_id, unit_name=None):
-    """Checks if Unit ID is a percentage type (10, 11, 12) or name contains %."""
     if unit_name and "%" in str(unit_name):
         return True
     try:
@@ -91,10 +137,6 @@ def is_percentage_unit(unit_id, unit_name=None):
         return False
 
 def merge_units_metadata(df, uploaded_file):
-    """
-    Reads the 'Units' sheet and directly attaches 'unit_id' and 'unit_name_ar' 
-    to every row in df matching by kpi_code.
-    """
     df_merged = df.copy()
     try:
         excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
@@ -134,10 +176,6 @@ def merge_units_metadata(df, uploaded_file):
     return df_merged
 
 def validate_and_clean_data(df, uploaded_file=None):
-    """
-    Validates rules, enforces locked months (wiping disallowed entries), 
-    and checks allow_negative_values controls (allow_negative == 1 -> allowed, else blocked).
-    """
     cleaned_df = df.copy()
     
     if uploaded_file is not None:
@@ -153,7 +191,6 @@ def validate_and_clean_data(df, uploaded_file=None):
         kpi_code = get_col_val(row, CODE_ALIASES, "")
         kpi_name = get_col_val(row, NAME_ALIASES, "")
 
-        # Read allow_negative_values flag
         allow_neg_val = get_col_val(row, NEG_ALIASES, 0)
         try:
             is_neg_allowed = int(float(allow_neg_val)) == 1
@@ -170,7 +207,6 @@ def validate_and_clean_data(df, uploaded_file=None):
 
             value = row[month_col]
 
-            # 1. STRICT MONTH LOCKING BY FREQUENCY
             if month_num not in valid_months:
                 if pd.notna(value) and str(value).strip() != "" and str(value).strip().lower() != "none":
                     errors.append({
@@ -186,29 +222,25 @@ def validate_and_clean_data(df, uploaded_file=None):
                     cleaned_df.loc[index, month_col] = np.nan
                 continue
 
-            # Skip empty cells
             if pd.isna(value) or str(value).strip() == "" or str(value).strip().lower() == "none":
                 cleaned_df.loc[index, month_col] = np.nan
                 continue
 
-            # 2. NUMERIC & NEGATIVE CONTROL VALIDATION
             try:
                 val_float = float(value)
 
-                # Check Negative Entry Control Rule
                 if val_float < 0.0 and not is_neg_allowed:
                     errors.append({
                         "kpi_code": kpi_code,
                         "kpi_name_ar": kpi_name,
                         "Month": month_col,
                         "Value": value,
-                        "Error": "Negative values NOT allowed for this KPI (allow_negative_values != 1). Value cleared."
+                        "Error": "Negative values NOT allowed for this KPI. Value cleared."
                     })
                     cleaned_df.loc[index, month_col] = np.nan
                     cleared_count += 1
                     continue
 
-                # Percentage conversions (e.g. 80 -> 0.8)
                 if is_pct:
                     if 1.0 < val_float <= 100.0:
                         val_float = val_float / 100.0
@@ -242,12 +274,8 @@ def validate_and_clean_data(df, uploaded_file=None):
     return cleaned_df, errors, cleared_count
 
 def generate_unformatted_excel(df, uploaded_file, target_sheet_name):
-    """
-    Exports dataset to .xlsx directly as raw values, keeping original sheet structures.
-    """
     output_xlsx = io.BytesIO()
     excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
-
     df_to_export = merge_units_metadata(df, uploaded_file)
 
     with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
@@ -270,7 +298,6 @@ if uploaded_file is not None:
         excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
         target_sheet = SHEET_NAME if SHEET_NAME in excel_file.sheet_names else excel_file.sheet_names[0]
 
-        # Load file into Session State
         if "master_df" not in st.session_state or st.session_state.get("file_name") != uploaded_file.name:
             df_raw = pd.read_excel(uploaded_file, sheet_name=target_sheet, engine="openpyxl")
             df_raw.columns = [clean_header(col) for col in df_raw.columns]
@@ -283,7 +310,7 @@ if uploaded_file is not None:
         df = st.session_state["master_df"]
         st.success(f"✅ Sheet '{target_sheet}' loaded successfully.")
 
-        # Filter Section: Year & Frequency
+        # Filters
         col_f1, col_f2 = st.columns(2)
         with col_f1:
             years = sorted(df["year"].dropna().astype(str).unique().tolist()) if "year" in df.columns else []
@@ -293,7 +320,6 @@ if uploaded_file is not None:
             freq_options = ["All Frequencies", "1 - Monthly", "2 - Quarterly", "3 - Semi-Annual", "4 - Annual"]
             selected_freq_str = st.selectbox("Filter by Frequency (Locks non-applicable months)", freq_options)
 
-        # Apply Filters
         working_df = df.copy()
         if selected_year:
             working_df = working_df[working_df["year"].astype(str) == str(selected_year)]
@@ -308,20 +334,12 @@ if uploaded_file is not None:
         st.subheader("📝 Edit KPI Data")
         st.caption("🔒 Non-month columns are locked. Negative values are blocked unless allow_negative_values = 1.")
 
-        # ------------------------------------------------------------
-        # STRICT UI COLUMN LOCKING
-        # Lock ALL columns EXCEPT Month columns (1 to 12)
-        # ------------------------------------------------------------
         column_configs = {}
         for col in working_df.columns:
             if col not in MONTH_COLUMNS:
                 column_configs[col] = st.column_config.TextColumn(disabled=True)
 
-        # Configure Month Columns (Disable locked months based on Frequency)
-        if selected_freq_num is not None:
-            allowed_months = get_valid_months(selected_freq_num)
-        else:
-            allowed_months = list(range(1, 13))
+        allowed_months = get_valid_months(selected_freq_num) if selected_freq_num is not None else list(range(1, 13))
 
         for m in MONTH_COLUMNS:
             if m in working_df.columns:
@@ -334,7 +352,6 @@ if uploaded_file is not None:
                     help="Locked for Frequency" if is_disabled else "Editable Month Entry"
                 )
 
-        # Render Data Editor with unique version key
         editor_key = f"kpi_editor_v_{st.session_state['editor_version']}"
         
         edited_df = st.data_editor(
@@ -346,10 +363,8 @@ if uploaded_file is not None:
             key=editor_key
         )
 
-        # Validate edits submitted through editor
         cleaned_edited_df, edit_errors, cleared_count = validate_and_clean_data(edited_df, uploaded_file)
 
-        # Update state and force rerun if changes/clears occurred
         if cleared_count > 0 or not cleaned_edited_df.equals(working_df):
             code_col = get_col_name(df, CODE_ALIASES)
 
@@ -375,21 +390,19 @@ if uploaded_file is not None:
                 st.dataframe(pd.DataFrame(edit_errors), use_container_width=True)
 
         # ============================================================
-        # EXPORT / DOWNLOAD SECTION
+        # EXPORT & SHAREPOINT SAVE SECTION
         # ============================================================
         st.markdown("---")
-        st.subheader("💾 Choose Your Download Format")
+        st.subheader("💾 Export Options & Cloud Save")
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
 
-        # OPTION 1: Excel (.xlsx)
+        output_xlsx_data = generate_unformatted_excel(df, uploaded_file, target_sheet)
+        download_name_xlsx = uploaded_file.name.rsplit('.', 1)[0] + "_updated.xlsx"
+
+        # 1. Excel Download
         with col1:
-            st.markdown("### **Option 1: Complete Workbook (`.xlsx`)**")
-            st.write("Preserves all original sheets (`Entry`, `Units`, etc.) with raw validated numbers.")
-
-            output_xlsx_data = generate_unformatted_excel(df, uploaded_file, target_sheet)
-            download_name_xlsx = uploaded_file.name.rsplit('.', 1)[0] + "_updated.xlsx"
-
+            st.markdown("### **Option 1: Complete Workbook**")
             st.download_button(
                 label="⬇️ Download Excel (.xlsx)",
                 data=output_xlsx_data,
@@ -399,13 +412,10 @@ if uploaded_file is not None:
                 use_container_width=True
             )
 
-        # OPTION 2: Entry Sheet CSV
+        # 2. CSV Download
         with col2:
-            st.markdown("### **Option 2: Data Table Only (`.csv`)**")
-            st.write("Exports only the cleaned `Entry` sheet with UTF-8 encoding (Arabic language safe).")
-
+            st.markdown("### **Option 2: Data Table Only**")
             output_csv = df.to_csv(index=False).encode('utf-8-sig')
-
             st.download_button(
                 label="⬇️ Download CSV (.csv)",
                 data=output_csv,
@@ -413,6 +423,18 @@ if uploaded_file is not None:
                 mime="text/csv",
                 use_container_width=True
             )
+
+        # 3. Save to SharePoint
+        with col3:
+            st.markdown("### **Option 3: Save to SharePoint**")
+            if st.button("☁️ Save to SharePoint", type="secondary", use_container_width=True):
+                with st.spinner("Connecting to SharePoint..."):
+                    try:
+                        res = upload_to_sharepoint_as_user(output_xlsx_data, download_name_xlsx)
+                        st.success(f"✅ Saved directly to SharePoint!\n**File:** `{download_name_xlsx}`")
+                    except Exception as sp_err:
+                        st.error("❌ Failed to upload file to SharePoint.")
+                        st.exception(sp_err)
 
     except Exception as e:
         st.error("An error occurred while processing the Excel workbook.")
