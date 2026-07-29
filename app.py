@@ -17,11 +17,6 @@ st.set_page_config(
 st.title("📊 KPI Data Entry System")
 st.write("Upload your KPI Excel file, edit month entries with automated validation, and export your cleaned workbook.")
 
-# Sidebar for setting output protection password
-with st.sidebar:
-    st.header("⚙️ Protection Settings")
-    SHEET_PASSWORD = st.text_input("Export Password for 'Entry' Sheet", value="1234", type="password")
-
 # ============================================================
 # CONSTANTS & COLUMN ALIASES
 # ============================================================
@@ -65,8 +60,8 @@ def get_col_name(df, aliases):
 def get_valid_months(frequency):
     """
     Frequency Mapping:
-    1 = Monthly      -> All months [1..12]
-    2 = Quarterly    -> [3, 6, 9, 12]
+    1 = Monthly     -> All months [1..12]
+    2 = Quarterly   -> [3, 6, 9, 12]
     3 = Semi-Annual -> [6, 12]
     4 = Annual      -> [12]
     """
@@ -102,7 +97,6 @@ def merge_units_metadata(df, uploaded_file):
     """
     df_merged = df.copy()
     try:
-        uploaded_file.seek(0)
         excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
         if "Units" in excel_file.sheet_names:
             units_df = pd.read_excel(uploaded_file, sheet_name="Units", engine="openpyxl")
@@ -159,6 +153,7 @@ def validate_and_clean_data(df, uploaded_file=None):
         kpi_code = get_col_val(row, CODE_ALIASES, "")
         kpi_name = get_col_val(row, NAME_ALIASES, "")
 
+        # Read allow_negative_values flag
         allow_neg_val = get_col_val(row, NEG_ALIASES, 0)
         try:
             is_neg_allowed = int(float(allow_neg_val)) == 1
@@ -200,6 +195,7 @@ def validate_and_clean_data(df, uploaded_file=None):
             try:
                 val_float = float(value)
 
+                # Check Negative Entry Control Rule
                 if val_float < 0.0 and not is_neg_allowed:
                     errors.append({
                         "kpi_code": kpi_code,
@@ -212,6 +208,7 @@ def validate_and_clean_data(df, uploaded_file=None):
                     cleared_count += 1
                     continue
 
+                # Percentage conversions (e.g. 80 -> 0.8)
                 if is_pct:
                     if 1.0 < val_float <= 100.0:
                         val_float = val_float / 100.0
@@ -244,38 +241,22 @@ def validate_and_clean_data(df, uploaded_file=None):
 
     return cleaned_df, errors, cleared_count
 
-def generate_unformatted_excel(df, uploaded_file, target_sheet_name, password):
+def generate_unformatted_excel(df, uploaded_file, target_sheet_name):
     """
-    Overwrites modified data in the target sheet and re-applies password 
-    protection when saved. No existing password is needed to unprotect.
+    Exports dataset to .xlsx directly as raw values, keeping original sheet structures.
     """
-    uploaded_file.seek(0)
-    wb = openpyxl.load_workbook(uploaded_file)
-    
-    if target_sheet_name in wb.sheetnames:
-        ws = wb[target_sheet_name]
-        
-        # 1. Disable sheet protection directly (no password needed)
-        ws.protection.disable()
-        
-        # 2. Map headers and write back cleaned data
-        headers = [clean_header(cell.value) for cell in ws[1]]
-        df_to_export = merge_units_metadata(df, uploaded_file)
-        
-        for row_idx, row_data in df_to_export.iterrows():
-            excel_row = row_idx + 2  # 1-indexed header offset
-            for col_idx, col_name in enumerate(headers, start=1):
-                if col_name in df_to_export.columns:
-                    val = row_data[col_name]
-                    ws.cell(row=excel_row, column=col_idx, value=None if pd.isna(val) else val)
-
-        # 3. Enable protection and set the password for the output file
-        ws.protection.enable()
-        if password:
-            ws.protection.password = password
-
     output_xlsx = io.BytesIO()
-    wb.save(output_xlsx)
+    excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
+
+    df_to_export = merge_units_metadata(df, uploaded_file)
+
+    with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
+        df_to_export.to_excel(writer, sheet_name=target_sheet_name, index=False)
+        for sheet in excel_file.sheet_names:
+            if sheet != target_sheet_name:
+                other_df = pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
+                other_df.to_excel(writer, sheet_name=sheet, index=False)
+
     output_xlsx.seek(0)
     return output_xlsx
 
@@ -286,13 +267,11 @@ uploaded_file = st.file_uploader("Upload Excel File", type=["xlsm", "xlsx", "xls
 
 if uploaded_file is not None:
     try:
-        uploaded_file.seek(0)
         excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
         target_sheet = SHEET_NAME if SHEET_NAME in excel_file.sheet_names else excel_file.sheet_names[0]
 
         # Load file into Session State
         if "master_df" not in st.session_state or st.session_state.get("file_name") != uploaded_file.name:
-            uploaded_file.seek(0)
             df_raw = pd.read_excel(uploaded_file, sheet_name=target_sheet, engine="openpyxl")
             df_raw.columns = [clean_header(col) for col in df_raw.columns]
             
@@ -329,12 +308,16 @@ if uploaded_file is not None:
         st.subheader("📝 Edit KPI Data")
         st.caption("🔒 Non-month columns are locked. Negative values are blocked unless allow_negative_values = 1.")
 
-        # UI Column Locking
+        # ------------------------------------------------------------
+        # STRICT UI COLUMN LOCKING
+        # Lock ALL columns EXCEPT Month columns (1 to 12)
+        # ------------------------------------------------------------
         column_configs = {}
         for col in working_df.columns:
             if col not in MONTH_COLUMNS:
                 column_configs[col] = st.column_config.TextColumn(disabled=True)
 
+        # Configure Month Columns (Disable locked months based on Frequency)
         if selected_freq_num is not None:
             allowed_months = get_valid_months(selected_freq_num)
         else:
@@ -351,6 +334,7 @@ if uploaded_file is not None:
                     help="Locked for Frequency" if is_disabled else "Editable Month Entry"
                 )
 
+        # Render Data Editor with unique version key
         editor_key = f"kpi_editor_v_{st.session_state['editor_version']}"
         
         edited_df = st.data_editor(
@@ -362,9 +346,10 @@ if uploaded_file is not None:
             key=editor_key
         )
 
-        # Validate edits
+        # Validate edits submitted through editor
         cleaned_edited_df, edit_errors, cleared_count = validate_and_clean_data(edited_df, uploaded_file)
 
+        # Update state and force rerun if changes/clears occurred
         if cleared_count > 0 or not cleaned_edited_df.equals(working_df):
             code_col = get_col_name(df, CODE_ALIASES)
 
@@ -389,17 +374,20 @@ if uploaded_file is not None:
             with st.expander("View Wiped Entries Log"):
                 st.dataframe(pd.DataFrame(edit_errors), use_container_width=True)
 
-        # Download Section
+        # ============================================================
+        # EXPORT / DOWNLOAD SECTION
+        # ============================================================
         st.markdown("---")
         st.subheader("💾 Choose Your Download Format")
 
         col1, col2 = st.columns(2)
 
+        # OPTION 1: Excel (.xlsx)
         with col1:
-            st.markdown("### **Option 1: Complete Protected Workbook (`.xlsx`)**")
-            st.write("Preserves all original sheets (`Entry`, `Units`, etc.) with raw validated numbers, re-protected with password.")
+            st.markdown("### **Option 1: Complete Workbook (`.xlsx`)**")
+            st.write("Preserves all original sheets (`Entry`, `Units`, etc.) with raw validated numbers.")
 
-            output_xlsx_data = generate_unformatted_excel(df, uploaded_file, target_sheet, SHEET_PASSWORD)
+            output_xlsx_data = generate_unformatted_excel(df, uploaded_file, target_sheet)
             download_name_xlsx = uploaded_file.name.rsplit('.', 1)[0] + "_updated.xlsx"
 
             st.download_button(
@@ -411,6 +399,7 @@ if uploaded_file is not None:
                 use_container_width=True
             )
 
+        # OPTION 2: Entry Sheet CSV
         with col2:
             st.markdown("### **Option 2: Data Table Only (`.csv`)**")
             st.write("Exports only the cleaned `Entry` sheet with UTF-8 encoding (Arabic language safe).")
