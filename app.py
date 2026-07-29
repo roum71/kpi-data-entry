@@ -20,7 +20,7 @@ st.write("Upload your KPI Excel file, edit month entries with automated validati
 # ============================================================
 # CONSTANTS & COLUMN ALIASES
 # ============================================================
-MONTH_COLUMNS = [str(i) for i in range(1, 13)]
+ALL_MONTH_COLUMNS = [str(i) for i in range(1, 13)]
 
 FREQ_ALIASES = ["Freq", "measurement_frequency", "freq", "frequency", "التردد"]
 UNIT_ALIASES = ["Unit", "unit_id", "unit", "Unit ID", "unit_code"]
@@ -238,7 +238,7 @@ if uploaded_file is not None:
 
         with col_f2:
             freq_options = ["All Frequencies", "1 - Monthly", "2 - Quarterly", "3 - Semi-Annual", "4 - Annual"]
-            selected_freq_str = st.selectbox("Filter by Frequency (Locks non-applicable months)", freq_options)
+            selected_freq_str = st.selectbox("Filter by Frequency", freq_options)
 
         # Apply Filters
         working_df = df.copy()
@@ -256,33 +256,37 @@ if uploaded_file is not None:
         st.caption("🔒 Non-month columns are locked. Negative values are blocked unless allow_negative_values = 1.")
 
         # ------------------------------------------------------------
-        # STRICT UI COLUMN LOCKING
+        # INTELLIGENT DYNAMIC COLUMN HIDING & UI LOCKING
         # ------------------------------------------------------------
-        column_configs = {}
-        for col in working_df.columns:
-            if col not in MONTH_COLUMNS:
-                column_configs[col] = st.column_config.TextColumn(disabled=True)
-
         if selected_freq_num is not None:
             allowed_months = get_valid_months(selected_freq_num)
         else:
             allowed_months = list(range(1, 13))
 
-        for m in MONTH_COLUMNS:
-            if m in working_df.columns:
-                m_num = int(m)
-                is_disabled = m_num not in allowed_months
+        allowed_month_cols = [str(m) for m in allowed_months]
 
-                column_configs[m] = st.column_config.NumberColumn(
-                    label=f"Month {m}",
-                    disabled=is_disabled,
-                    help="Locked for Frequency" if is_disabled else "Editable Month Entry"
+        # 1. Hide non-applicable month columns from working_df view
+        hidden_month_cols = [m for m in ALL_MONTH_COLUMNS if m in working_df.columns and m not in allowed_month_cols]
+        display_df = working_df.drop(columns=hidden_month_cols, errors="ignore")
+
+        # 2. Configure Column Lock Rules for displayed columns
+        column_configs = {}
+        for col in display_df.columns:
+            if col not in ALL_MONTH_COLUMNS:
+                # Lock metadata columns
+                column_configs[col] = st.column_config.TextColumn(disabled=True)
+            else:
+                # Active editable month columns
+                column_configs[col] = st.column_config.NumberColumn(
+                    label=f"Month {col}",
+                    disabled=False,
+                    help="Editable Month Entry"
                 )
 
         editor_key = f"kpi_editor_v_{st.session_state['editor_version']}"
         
         edited_df = st.data_editor(
-            working_df,
+            display_df,
             column_config=column_configs,
             use_container_width=True,
             hide_index=True,
@@ -292,7 +296,7 @@ if uploaded_file is not None:
 
         cleaned_edited_df, edit_errors, cleared_count = validate_and_clean_data(edited_df)
 
-        if cleared_count > 0 or not cleaned_edited_df.equals(working_df):
+        if cleared_count > 0 or not cleaned_edited_df.equals(display_df):
             code_col = get_col_name(df, CODE_ALIASES)
 
             if code_col:
@@ -301,7 +305,9 @@ if uploaded_file is not None:
                     mask = df[code_col] == kpi_code_val
                     if selected_year and "year" in df.columns:
                         mask = mask & (df["year"].astype(str) == str(selected_year))
-                    for m in MONTH_COLUMNS:
+                    
+                    # Update active edited months into the master dataframe
+                    for m in allowed_month_cols:
                         if m in df.columns:
                             df.loc[mask, m] = row[m]
 
