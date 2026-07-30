@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import io
 import re
-import os
 import openpyxl
 
 # ============================================================
@@ -39,6 +38,7 @@ STRONG_ADMIN_PASSWORD = "KPi#Secure2026!Lock"
 # HELPER FUNCTIONS
 # ============================================================
 def clean_header(header_name):
+    """Cleans column headers to match standard field names."""
     if header_name is None:
         return ""
     header_str = str(header_name)
@@ -47,18 +47,27 @@ def clean_header(header_name):
     return header_str.strip()
 
 def get_col_val(row, aliases, default=None):
+    """Safely reads a column value using any of its supported header aliases."""
     for name in aliases:
         if name in row and pd.notna(row[name]):
             return row[name]
     return default
 
 def get_col_name(df, aliases):
+    """Returns the actual matching column name present in a DataFrame."""
     for col in df.columns:
         if col in aliases:
             return col
     return None
 
 def get_valid_months(frequency):
+    """
+    Frequency Mapping:
+    1 = Monthly      -> All months [1..12]
+    2 = Quarterly    -> [3, 6, 9, 12]
+    3 = Semi-Annual  -> [6, 12]
+    4 = Annual       -> [12]
+    """
     try:
         freq = int(float(frequency))
     except (ValueError, TypeError):
@@ -75,6 +84,7 @@ def get_valid_months(frequency):
     return list(range(1, 13))
 
 def apply_excel_protection(workbook, password=STRONG_ADMIN_PASSWORD):
+    """Applies strict password protection to all sheets in an openpyxl Workbook."""
     for ws in workbook.worksheets:
         ws.protection.password = password
         ws.protection.sheet = True
@@ -92,6 +102,10 @@ def apply_excel_protection(workbook, password=STRONG_ADMIN_PASSWORD):
         ws.protection.selectUnlockedCells = True
 
 def validate_and_clean_data(df):
+    """
+    Validates rules, enforces locked months (wiping disallowed entries),
+    and checks allow_negative_values controls.
+    """
     cleaned_df = df.copy()
     errors = []
     cleared_count = 0
@@ -116,6 +130,7 @@ def validate_and_clean_data(df):
 
             value = row[month_col]
 
+            # 1. STRICT MONTH LOCKING BY FREQUENCY
             if month_num not in valid_months:
                 if pd.notna(value) and str(value).strip() != "" and str(value).strip().lower() != "none":
                     errors.append({
@@ -131,13 +146,16 @@ def validate_and_clean_data(df):
                     cleaned_df.loc[index, month_col] = np.nan
                 continue
 
+            # Skip empty cells
             if pd.isna(value) or str(value).strip() == "" or str(value).strip().lower() == "none":
                 cleaned_df.loc[index, month_col] = np.nan
                 continue
 
+            # 2. NUMERIC & NEGATIVE CONTROL VALIDATION
             try:
                 val_float = float(value)
 
+                # Check Negative Entry Control Rule
                 if val_float < 0.0 and not is_neg_allowed:
                     errors.append({
                         "kpi_code": kpi_code,
@@ -166,6 +184,7 @@ def validate_and_clean_data(df):
     return cleaned_df, errors, cleared_count
 
 def generate_unformatted_excel(df, uploaded_file, target_sheet_name):
+    """Exports cleaned dataset to .xlsx directly as protected read-only worksheets."""
     output_xlsx = io.BytesIO()
     excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
 
@@ -183,6 +202,10 @@ def generate_unformatted_excel(df, uploaded_file, target_sheet_name):
     return output_xlsx
 
 def generate_long_format_excel(df):
+    """
+    Converts wide-format month data (1-12 columns) into long unpivoted format.
+    Includes Date column. NOT password protected.
+    """
     present_month_cols = [col for col in ALL_MONTH_COLUMNS if col in df.columns]
     id_vars = [col for col in df.columns if col not in ALL_MONTH_COLUMNS]
 
@@ -319,80 +342,40 @@ if uploaded_file is not None:
                 st.rerun()
 
         # ============================================================
-        # ONEDRIVE / LOCAL DIRECTORY SYNC SECTION
+        # EXPORT & DOWNLOAD SECTION
         # ============================================================
         st.markdown("---")
-        st.subheader("🔄 الحفظ والتزامن المباشر في مجلد OneDrive الأصلي")
+        st.subheader("💾 Export Options")
 
-        # 1. محاولة استخراج المسار المباشر للملف الأصلي المرفوع
-        file_path_found = False
-        original_full_path = ""
+        col1, col2 = st.columns(2)
 
-        # إذا تم رفع الملف بسحبه أو باختياره من مجلد محلي
-        if hasattr(uploaded_file, 'name'):
-            # افتراضياً يُبحث في مجلد OneDrive للمستخدم أو مجلدات المشروع
-            possible_onedrive_path = os.path.abspath(uploaded_file.name)
-            if os.path.exists(possible_onedrive_path):
-                file_path_found = True
-                original_full_path = possible_onedrive_path
+        # 1. Wide Format
+        with col1:
+            st.markdown("### 1. Wide Format (Protected)")
+            st.caption("🔒 Updates original file structure with password protection.")
+            output_xlsx_data = generate_unformatted_excel(df, uploaded_file, target_sheet)
+            st.download_button(
+                label=f"⬇️ Download ({uploaded_file.name})",
+                data=output_xlsx_data,
+                file_name=uploaded_file.name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True
+            )
 
-        # إتاحة حقل لتحديث المسار المباشر إن لم يكتشف تلقائياً
-        target_dir = st.text_input(
-            "تأكيد مسار المجلد على OneDrive (OneDrive Folder Directory):",
-            value=os.path.dirname(original_full_path) if file_path_found else os.getcwd(),
-            help="قم بنسخ مسار مجلد OneDrive المباشر هنا ليتم تحديث الملفات داخله فوراً"
-        )
-
-        if st.button("🔄 حفظ وتحديث في مجلد OneDrive مباشرة", type="primary", use_container_width=True):
-            if os.path.exists(target_dir):
-                try:
-                    # 1. استبدال وتحديث الملف الأصلي Wide Format (محمي بكلمة سر وبنفس الاسم بالضبط)
-                    wide_path = os.path.join(target_dir, uploaded_file.name)
-                    output_wide = generate_unformatted_excel(df, uploaded_file, target_sheet)
-                    with open(wide_path, "wb") as f:
-                        f.write(output_wide.getbuffer())
-
-                    # 2. إنشاء وتحديث ملف الهيكلة الطولية Long Format بجانبه في نفس المجلد (بدون كلمة سر)
-                    long_filename = uploaded_file.name.rsplit('.', 1)[0] + "_LongFormat.xlsx"
-                    long_path = os.path.join(target_dir, long_filename)
-                    output_long = generate_long_format_excel(df)
-                    with open(long_path, "wb") as f:
-                        f.write(output_long.getbuffer())
-
-                    st.success(f"✅ تم تحديث الملف الأصلي بـ (Wide Format) وإنشاء الملف الطولي (Long Format) في مجلد OneDrive بنجاح!")
-                    st.info(f"📂 المسار: `{target_dir}`")
-                    st.caption("☁️ سيقوم OneDrive الآن برفع وتزامن التعديلات تلقائياً إلى السحابة.")
-                except PermissionError:
-                    st.error("❌ تعذر تعديل الملف لأن الملف مفتوح حالياً في برنامج Excel! يرجى إغلاق ملف Excel وإعادة المحاولة.")
-                except Exception as save_e:
-                    st.error(f"❌ حدث خطأ أثناء الحفظ: {save_e}")
-            else:
-                st.error("❌ المسار المحدد غير موجود. يرجى التأكد من مسار مجلد OneDrive.")
-
-        # ============================================================
-        # BROWSER DOWNLOAD OPTION
-        # ============================================================
-        with st.expander("⬇️ خيارات التنزيل اليدوي عبر المتصفح"):
-            col1, col2 = st.columns(2)
-            with col1:
-                output_xlsx_data = generate_unformatted_excel(df, uploaded_file, target_sheet)
-                st.download_button(
-                    label=f"⬇️ تنزيل Wide Format ({uploaded_file.name})",
-                    data=output_xlsx_data,
-                    file_name=uploaded_file.name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
-            with col2:
-                output_long_data = generate_long_format_excel(df)
-                long_filename = uploaded_file.name.rsplit('.', 1)[0] + "_LongFormat.xlsx"
-                st.download_button(
-                    label="⬇️ تنزيل Long Format (.xlsx)",
-                    data=output_long_data,
-                    file_name=long_filename,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True
-                )
+        # 2. Long Format
+        with col2:
+            st.markdown("### 2. Long Format (Unprotected)")
+            st.caption("🔓 Unpivoted month columns with Date field. No password.")
+            output_long_data = generate_long_format_excel(df)
+            long_filename = uploaded_file.name.rsplit('.', 1)[0] + "_LongFormat.xlsx"
+            st.download_button(
+                label="⬇️ Download Long Format (.xlsx)",
+                data=output_long_data,
+                file_name=long_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
     except Exception as e:
         st.error("An error occurred while processing the Excel workbook.")
