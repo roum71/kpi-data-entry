@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import io
 import re
+import os
 import openpyxl
 
 # ============================================================
@@ -63,10 +64,10 @@ def get_col_name(df, aliases):
 def get_valid_months(frequency):
     """
     Frequency Mapping:
-    1 = Monthly     -> All months [1..12]
-    2 = Quarterly   -> [3, 6, 9, 12]
-    3 = Semi-Annual -> [6, 12]
-    4 = Annual      -> [12]
+    1 = Monthly      -> All months [1..12]
+    2 = Quarterly    -> [3, 6, 9, 12]
+    3 = Semi-Annual  -> [6, 12]
+    4 = Annual       -> [12]
     """
     try:
         freq = int(float(frequency))
@@ -83,11 +84,28 @@ def get_valid_months(frequency):
         return [12]
     return list(range(1, 13))
 
+def apply_excel_protection(workbook, password=STRONG_ADMIN_PASSWORD):
+    """Applies strict password protection to all sheets in an openpyxl Workbook."""
+    for ws in workbook.worksheets:
+        ws.protection.password = password
+        ws.protection.sheet = True
+        ws.protection.enable()
+        
+        ws.protection.formatCells = False
+        ws.protection.formatColumns = False
+        ws.protection.formatRows = False
+        ws.protection.insertColumns = False
+        ws.protection.insertRows = False
+        ws.protection.insertHyperlinks = False
+        ws.protection.deleteColumns = False
+        ws.protection.deleteRows = False
+        ws.protection.selectLockedCells = True
+        ws.protection.selectUnlockedCells = True
+
 def validate_and_clean_data(df):
     """
     Validates rules, enforces locked months (wiping disallowed entries),
-    and checks allow_negative_values controls (allow_negative == 1 -> allowed, else blocked).
-    Keeps all numeric entries exactly as entered without scaling/division.
+    and checks allow_negative_values controls.
     """
     cleaned_df = df.copy()
     errors = []
@@ -145,13 +163,12 @@ def validate_and_clean_data(df):
                         "kpi_name_ar": kpi_name,
                         "Month": month_col,
                         "Value": value,
-                        "Error": "Negative values NOT allowed for this KPI (allow_negative_values != 1). Value cleared."
+                        "Error": "Negative values NOT allowed for this KPI. Value cleared."
                     })
                     cleaned_df.loc[index, month_col] = np.nan
                     cleared_count += 1
                     continue
 
-                # Keep exact entered numeric value
                 cleaned_df.loc[index, month_col] = val_float
 
             except (ValueError, TypeError):
@@ -168,41 +185,65 @@ def validate_and_clean_data(df):
     return cleaned_df, errors, cleared_count
 
 def generate_unformatted_excel(df, uploaded_file, target_sheet_name):
-    """
-    Exports cleaned dataset to .xlsx directly as protected read-only worksheets.
-    Applies a strong password lock to ensure users cannot unprotect or edit cells.
-    """
+    """Exports cleaned dataset to .xlsx directly as protected read-only worksheets."""
     output_xlsx = io.BytesIO()
     excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
 
     with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
-        # Write main entry sheet
         df.to_excel(writer, sheet_name=target_sheet_name, index=False)
         
-        # Write remaining original sheets (if any)
         for sheet in excel_file.sheet_names:
             if sheet != target_sheet_name:
                 other_df = pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
                 other_df.to_excel(writer, sheet_name=sheet, index=False)
         
-        # Lock and protect every worksheet using strong password protection
-        wb = writer.book
-        for ws in wb.worksheets:
-            ws.protection.password = STRONG_ADMIN_PASSWORD
-            ws.protection.sheet = True
-            ws.protection.enable()
-            
-            # Strict modification locks
-            ws.protection.formatCells = False
-            ws.protection.formatColumns = False
-            ws.protection.formatRows = False
-            ws.protection.insertColumns = False
-            ws.protection.insertRows = False
-            ws.protection.insertHyperlinks = False
-            ws.protection.deleteColumns = False
-            ws.protection.deleteRows = False
-            ws.protection.selectLockedCells = True
-            ws.protection.selectUnlockedCells = True
+        apply_excel_protection(writer.book)
+
+    output_xlsx.seek(0)
+    return output_xlsx
+
+def generate_long_format_excel(df):
+    """
+    Converts wide-format month data (1-12 columns) into long unpivoted format.
+    Includes Date column. NOT password protected.
+    """
+    present_month_cols = [col for col in ALL_MONTH_COLUMNS if col in df.columns]
+    id_vars = [col for col in df.columns if col not in ALL_MONTH_COLUMNS]
+
+    long_df = pd.melt(
+        df,
+        id_vars=id_vars,
+        value_vars=present_month_cols,
+        var_name="Month",
+        value_name="Value"
+    )
+
+    valid_rows = []
+    freq_col = get_col_name(df, FREQ_ALIASES)
+
+    for idx, row in long_df.iterrows():
+        frequency = row[freq_col] if freq_col and pd.notna(row[freq_col]) else 1
+        valid_months = get_valid_months(frequency)
+        valid_rows.append(int(row["Month"]) in valid_months)
+
+    long_df = long_df[valid_rows].reset_index(drop=True)
+    long_df["Month"] = long_df["Month"].astype(int)
+
+    if "year" in long_df.columns:
+        def build_date(r):
+            try:
+                yr = int(float(r["year"]))
+                mn = int(r["Month"])
+                return f"{yr:04d}-{mn:02d}-01"
+            except (ValueError, TypeError):
+                return np.nan
+        long_df["Date"] = long_df.apply(build_date, axis=1)
+    else:
+        long_df["Date"] = np.nan
+
+    output_xlsx = io.BytesIO()
+    with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
+        long_df.to_excel(writer, sheet_name="Long_Format_Data", index=False)
 
     output_xlsx.seek(0)
     return output_xlsx
@@ -217,7 +258,6 @@ if uploaded_file is not None:
         excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
         target_sheet = SHEET_NAME if SHEET_NAME in excel_file.sheet_names else excel_file.sheet_names[0]
 
-        # Load file into Session State
         if "master_df" not in st.session_state or st.session_state.get("file_name") != uploaded_file.name:
             df_raw = pd.read_excel(uploaded_file, sheet_name=target_sheet, engine="openpyxl")
             df_raw.columns = [clean_header(col) for col in df_raw.columns]
@@ -230,7 +270,7 @@ if uploaded_file is not None:
         df = st.session_state["master_df"]
         st.success(f"✅ Sheet '{target_sheet}' loaded successfully.")
 
-        # Filter Section: Year & Frequency
+        # Filter Section
         col_f1, col_f2 = st.columns(2)
         with col_f1:
             years = sorted(df["year"].dropna().astype(str).unique().tolist()) if "year" in df.columns else []
@@ -240,7 +280,6 @@ if uploaded_file is not None:
             freq_options = ["All Frequencies", "1 - Monthly", "2 - Quarterly", "3 - Semi-Annual", "4 - Annual"]
             selected_freq_str = st.selectbox("Filter by Frequency", freq_options)
 
-        # Apply Filters
         working_df = df.copy()
         if selected_year:
             working_df = working_df[working_df["year"].astype(str) == str(selected_year)]
@@ -253,35 +292,22 @@ if uploaded_file is not None:
                 working_df = working_df[working_df[freq_col_name].astype(str).str.startswith(str(selected_freq_num))]
 
         st.subheader("📝 Edit KPI Data")
-        st.caption("🔒 Non-month columns are locked. Negative values are blocked unless allow_negative_values = 1.")
 
-        # ------------------------------------------------------------
-        # INTELLIGENT DYNAMIC COLUMN HIDING & UI LOCKING
-        # ------------------------------------------------------------
         if selected_freq_num is not None:
             allowed_months = get_valid_months(selected_freq_num)
         else:
             allowed_months = list(range(1, 13))
 
         allowed_month_cols = [str(m) for m in allowed_months]
-
-        # 1. Hide non-applicable month columns from working_df view
         hidden_month_cols = [m for m in ALL_MONTH_COLUMNS if m in working_df.columns and m not in allowed_month_cols]
         display_df = working_df.drop(columns=hidden_month_cols, errors="ignore")
 
-        # 2. Configure Column Lock Rules for displayed columns
         column_configs = {}
         for col in display_df.columns:
             if col not in ALL_MONTH_COLUMNS:
-                # Lock metadata columns
                 column_configs[col] = st.column_config.TextColumn(disabled=True)
             else:
-                # Active editable month columns
-                column_configs[col] = st.column_config.NumberColumn(
-                    label=f"Month {col}",
-                    disabled=False,
-                    help="Editable Month Entry"
-                )
+                column_configs[col] = st.column_config.NumberColumn(label=f"Month {col}", disabled=False)
 
         editor_key = f"kpi_editor_v_{st.session_state['editor_version']}"
         
@@ -298,7 +324,6 @@ if uploaded_file is not None:
 
         if cleared_count > 0 or not cleaned_edited_df.equals(display_df):
             code_col = get_col_name(df, CODE_ALIASES)
-
             if code_col:
                 for idx, row in cleaned_edited_df.iterrows():
                     kpi_code_val = row[code_col]
@@ -306,7 +331,6 @@ if uploaded_file is not None:
                     if selected_year and "year" in df.columns:
                         mask = mask & (df["year"].astype(str) == str(selected_year))
                     
-                    # Update active edited months into the master dataframe
                     for m in allowed_month_cols:
                         if m in df.columns:
                             df.loc[mask, m] = row[m]
@@ -318,47 +342,67 @@ if uploaded_file is not None:
                 st.warning(f"⚠️ {cleared_count} invalid or disallowed entry(ies) were wiped.")
                 st.rerun()
 
-        if edit_errors:
-            with st.expander("View Wiped Entries Log"):
-                st.dataframe(pd.DataFrame(edit_errors), use_container_width=True)
-
         # ============================================================
-        # EXPORT / DOWNLOAD SECTION
+        # LOCAL SAVE BY PATH SECTION (إدخال المسار المباشر)
         # ============================================================
         st.markdown("---")
-        st.subheader("💾 Choose Your Download Format")
+        st.subheader("📁 Save Directly to Local Path (الحفظ المباشر في مجلد محدد)")
+
+        # مدخل نصي لكتابة المسار
+        default_dir = os.getcwd() # المسار الافتراضي هو المجلد الحالي للبرنامج
+        custom_path = st.text_input(
+            "أدخل مسار المجلد المراد الحفظ فيه (Folder Path):",
+            value=default_dir,
+            help="مثال على Windows: C:\\Users\\Name\\Documents\\KPI_Files"
+        )
+
+        if st.button("💾 حفظ الملفات مباشرة في المسار المعتمد"):
+            if os.path.exists(custom_path):
+                # 1. حفظ الهيكلة العريضة (بنفس اسم الملف وبكلمة سر)
+                wide_full_path = os.path.join(custom_path, uploaded_file.name)
+                output_wide = generate_unformatted_excel(df, uploaded_file, target_sheet)
+                with open(wide_full_path, "wb") as f:
+                    f.write(output_wide.getbuffer())
+
+                # 2. حفظ الهيكلة الطولية (بدون كلمة سر)
+                long_filename = uploaded_file.name.rsplit('.', 1)[0] + "_LongFormat.xlsx"
+                long_full_path = os.path.join(custom_path, long_filename)
+                output_long = generate_long_format_excel(df)
+                with open(long_full_path, "wb") as f:
+                    f.write(output_long.getbuffer())
+
+                st.success(f"✅ تم حفظ الملفين بنجاح في المسار:\n`{custom_path}`")
+            else:
+                st.error("❌ المسار المكتوب غير موجود على الجهاز. يرجى التأكد من صحة المسار.")
+
+        # ============================================================
+        # STANDARD DOWNLOAD BUTTONS (كخيار إضافي)
+        # ============================================================
+        st.markdown("---")
+        st.subheader("⬇️ Alternate Download via Browser")
 
         col1, col2 = st.columns(2)
 
-        # OPTION 1: Strongly Protected Excel (.xlsx)
         with col1:
-            st.markdown("### **Option 1: Protected Workbook (`.xlsx`)**")
-            st.write("🔒 Exported file is **Protected (Read-Only)**. Cells are password-locked from editing.")
-
+            st.markdown("### Wide Format (Protected)")
             output_xlsx_data = generate_unformatted_excel(df, uploaded_file, target_sheet)
-            download_name_xlsx = uploaded_file.name.rsplit('.', 1)[0] + "_protected.xlsx"
-
             st.download_button(
-                label="⬇️ Download Protected Excel (.xlsx)",
+                label=f"⬇️ Download ({uploaded_file.name})",
                 data=output_xlsx_data,
-                file_name=download_name_xlsx,
+                file_name=uploaded_file.name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
                 use_container_width=True
             )
 
-        # OPTION 2: Entry Sheet CSV
         with col2:
-            st.markdown("### **Option 2: Data Table Only (`.csv`)**")
-            st.write("Exports only the cleaned `Entry` sheet with UTF-8 encoding (Arabic language safe).")
-
-            output_csv = df.to_csv(index=False).encode('utf-8-sig')
-
+            st.markdown("### Long Format (Unprotected)")
+            output_long_data = generate_long_format_excel(df)
+            long_filename = uploaded_file.name.rsplit('.', 1)[0] + "_LongFormat.xlsx"
             st.download_button(
-                label="⬇️ Download CSV (.csv)",
-                data=output_csv,
-                file_name="Entry_updated.csv",
-                mime="text/csv",
+                label="⬇️ Download Long Format (.xlsx)",
+                data=output_long_data,
+                file_name=long_filename,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
 
