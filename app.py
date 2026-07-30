@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import io
 import re
-import os
 import openpyxl
 
 # ============================================================
@@ -343,61 +342,38 @@ if uploaded_file is not None:
                 st.rerun()
 
         # ============================================================
-        # LOCAL SAVE BY PATH SECTION (إدخال المسار المباشر)
+        # DOWNLOAD SECTION
         # ============================================================
         st.markdown("---")
-        st.subheader("📁 Save Directly to Local Path (الحفظ المباشر في مجلد محدد)")
-
-        # مدخل نصي لكتابة المسار
-        default_dir = os.getcwd() # المسار الافتراضي هو المجلد الحالي للبرنامج
-        custom_path = st.text_input(
-            "أدخل مسار المجلد المراد الحفظ فيه (Folder Path):",
-            value=default_dir,
-            help="مثال على Windows: C:\\Users\\Name\\Documents\\KPI_Files"
-        )
-
-        if st.button("💾 حفظ الملفات مباشرة في المسار المعتمد"):
-            if os.path.exists(custom_path):
-                # 1. حفظ الهيكلة العريضة (بنفس اسم الملف وبكلمة سر)
-                wide_full_path = os.path.join(custom_path, uploaded_file.name)
-                output_wide = generate_unformatted_excel(df, uploaded_file, target_sheet)
-                with open(wide_full_path, "wb") as f:
-                    f.write(output_wide.getbuffer())
-
-                # 2. حفظ الهيكلة الطولية (بدون كلمة سر)
-                long_filename = uploaded_file.name.rsplit('.', 1)[0] + "_LongFormat.xlsx"
-                long_full_path = os.path.join(custom_path, long_filename)
-                output_long = generate_long_format_excel(df)
-                with open(long_full_path, "wb") as f:
-                    f.write(output_long.getbuffer())
-
-                st.success(f"✅ تم حفظ الملفين بنجاح في المسار:\n`{custom_path}`")
-            else:
-                st.error("❌ المسار المكتوب غير موجود على الجهاز. يرجى التأكد من صحة المسار.")
-
-        # ============================================================
-        # STANDARD DOWNLOAD BUTTONS (كخيار إضافي)
-        # ============================================================
-        st.markdown("---")
-        st.subheader("⬇️ Alternate Download via Browser")
+        st.subheader("💾 Download Excel Files")
+        st.caption("💡 عند الضغط على الأزرار أدناه، سيفتح المتصفح نافذة لتحديد مسار حفظ الملف على جهازك (إذا كان خيار Ask where to save مفعلاً).")
 
         col1, col2 = st.columns(2)
 
+        # الخيار الأول: الهيكلة العريضة (بنفس اسم الملف الأصلي ومحمي بكلمة سر)
         with col1:
-            st.markdown("### Wide Format (Protected)")
+            st.markdown("### **1. Wide Format (Original)**")
+            st.write("🔒 Protected with Password. Keeps same file name.")
+
             output_xlsx_data = generate_unformatted_excel(df, uploaded_file, target_sheet)
+
             st.download_button(
                 label=f"⬇️ Download ({uploaded_file.name})",
                 data=output_xlsx_data,
                 file_name=uploaded_file.name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
                 use_container_width=True
             )
 
+        # الخيار الثاني: الهيكلة الطولية (غير محمي بكلمة سر)
         with col2:
-            st.markdown("### Long Format (Unprotected)")
+            st.markdown("### **2. Long Format (Unpivoted)**")
+            st.write("🔓 Months reshaped into rows with Date column. Not password protected.")
+
             output_long_data = generate_long_format_excel(df)
             long_filename = uploaded_file.name.rsplit('.', 1)[0] + "_LongFormat.xlsx"
+
             st.download_button(
                 label="⬇️ Download Long Format (.xlsx)",
                 data=output_long_data,
