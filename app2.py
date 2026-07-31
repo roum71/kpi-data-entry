@@ -23,16 +23,13 @@ st.caption(
 # ============================================================
 
 MONTH_COLUMNS = [str(i) for i in range(1, 13)]
-
 EXPORT_PASSWORD = "KPi#Secure2026!Lock"
-
 
 # ============================================================
 # COLUMN ALIASES
 # ============================================================
 
 YEAR_ALIASES = ["Year", "year", "السنة"]
-
 LOCATION_ALIASES = [
     "Location",
     "location",
@@ -40,7 +37,6 @@ LOCATION_ALIASES = [
     "location_code",
     "الموقع",
 ]
-
 FREQUENCY_ALIASES = [
     "Periodicity",
     "periodicity",
@@ -49,11 +45,8 @@ FREQUENCY_ALIASES = [
     "Frequency",
     "التكرار",
 ]
-
 KPI_CODE_ALIASES = ["KPI Code", "kpi_code", "Code", "code"]
-
 KPI_NAME_ALIASES = ["KPI Name", "KPI Name (AR)", "kpi_name", "name"]
-
 EVIDENCE_ALIASES = [
     "Evidence Status",
     "evidence_status",
@@ -63,9 +56,7 @@ EVIDENCE_ALIASES = [
     "Status",
     "status",
 ]
-
 COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
-
 
 # ============================================================
 # HELPER FUNCTIONS
@@ -75,11 +66,9 @@ COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
 def clean_header(col):
     if col is None:
         return ""
-
     col = str(col)
     col = col.replace("\xa0", " ")
     col = re.sub(r"[\n\r\t]", " ", col)
-
     return col.strip()
 
 
@@ -87,7 +76,6 @@ def find_column(df, aliases):
     for c in df.columns:
         if c in aliases:
             return c
-
     return None
 
 
@@ -96,7 +84,6 @@ def get_value(row, aliases, default=None):
         if c in row.index:
             if pd.notna(row[c]):
                 return row[c]
-
     return default
 
 
@@ -108,23 +95,15 @@ def get_value(row, aliases, default=None):
 def allowed_months(periodicity):
     val = str(periodicity).strip().upper()
 
-    # Monthly (1, M, Monthly) -> 1 to 12
     if val in ["1", "M", "MONTHLY"]:
         return MONTH_COLUMNS
-
-    # Quarterly (2, Q, Quarterly) -> 3, 6, 9, 12 ONLY
     elif val in ["2", "Q", "QUARTERLY"]:
         return ["3", "6", "9", "12"]
-
-    # Semi-Annual (3, S, SA, Semi Annual) -> 6, 12 ONLY
     elif val in ["3", "S", "SA", "SEMI ANNUAL", "SEMI-ANNUAL"]:
         return ["6", "12"]
-
-    # Annual (4, A, Annual, Annually) -> 12 ONLY
     elif val in ["4", "A", "ANNUAL", "ANNUALLY", "Y", "YEARLY"]:
         return ["12"]
 
-    # Fallback numerical check
     try:
         p = int(float(val))
         if p == 1:
@@ -149,6 +128,11 @@ def allowed_months(periodicity):
 def clean_invalid_entries(df):
     df = df.copy()
 
+    # Enforce float64 for month columns to ensure Streamlit NumberColumn compatibility
+    for m in MONTH_COLUMNS:
+        if m in df.columns:
+            df[m] = pd.to_numeric(df[m], errors="coerce").astype("float64")
+
     for idx in df.index:
         row = df.loc[idx]
         periodicity = get_value(row, FREQUENCY_ALIASES, "M")
@@ -158,22 +142,8 @@ def clean_invalid_entries(df):
             if month not in df.columns:
                 continue
 
-            value = row[month]
-
-            # Silently erase entries in unallowed months for this row's periodicity
+            # Clear values entered into disallowed months for this row's periodicity
             if month not in valid_months:
-                df.loc[idx, month] = np.nan
-                continue
-
-            # Skip empty inputs for valid months
-            if pd.isna(value) or str(value).strip() == "":
-                df.loc[idx, month] = np.nan
-                continue
-
-            # Erase non-numeric inputs
-            try:
-                df.loc[idx, month] = float(value)
-            except Exception:
                 df.loc[idx, month] = np.nan
 
     return df
@@ -204,10 +174,15 @@ def load_sheets(uploaded_file):
         df = pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
         df.columns = [clean_header(c) for c in df.columns]
 
-        # Convert month columns to object to avoid Pandas strict type lock errors
+        # Explicitly setup dtypes
         for col in df.columns:
-            if str(col).strip() in MONTH_COLUMNS:
-                df[col] = df[col].astype(object)
+            col_str = str(col).strip()
+            if col_str in MONTH_COLUMNS:
+                df[col] = pd.to_numeric(df[col], errors="coerce").astype(
+                    "float64"
+                )
+            elif col_str in EVIDENCE_ALIASES or col_str in COMMENT_ALIASES:
+                df[col] = df[col].fillna("").astype(str)
 
         df = clean_invalid_entries(df)
         sheets[sheet] = df
@@ -223,19 +198,15 @@ uploaded_file = st.file_uploader(
     "Upload KPI Excel Workbook", type=["xlsx", "xlsm"]
 )
 
-
 if uploaded_file:
-    # Load workbook sheets dynamically into session state
     if (
         "kpi_sheets" not in st.session_state
         or st.session_state.get("filename") != uploaded_file.name
     ):
         st.session_state["kpi_sheets"] = load_sheets(uploaded_file)
         st.session_state["filename"] = uploaded_file.name
-        st.session_state["editor_version"] = 0
 
     sheets = st.session_state["kpi_sheets"]
-
     st.success("Workbook loaded successfully")
 
     # ========================================================
@@ -256,7 +227,6 @@ if uploaded_file:
     # ========================================================
 
     st.subheader("🔎 Filters")
-
     c1, c2, c3 = st.columns(3)
 
     with c1:
@@ -325,8 +295,6 @@ if uploaded_file:
             cols_to_display.append(col)
 
     filtered_df = filtered_df[cols_to_display]
-
-    # Pre-clean filtered view before rendering to user
     filtered_df = clean_invalid_entries(filtered_df)
 
     # Define editable columns
@@ -334,15 +302,14 @@ if uploaded_file:
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
             editable_columns.append(col)
-        elif col in EVIDENCE_ALIASES:
-            editable_columns.append(col)
-        elif col in COMMENT_ALIASES:
+        elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
             editable_columns.append(col)
 
     disabled_columns = [
         col for col in filtered_df.columns if col not in editable_columns
     ]
 
+    # Explicit column configurations matching underlying DataFrame dtypes
     column_config = {}
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
@@ -354,10 +321,7 @@ if uploaded_file:
                 col, help="Editable text field"
             )
 
-    version = st.session_state.get("editor_version", 0)
-    editor_key = f"editor_{selected_sheet}_{version}"
-
-    # Render data editor
+    # Render data editor with clean static key per sheet
     edited_df = st.data_editor(
         filtered_df,
         column_config=column_config,
@@ -365,28 +329,23 @@ if uploaded_file:
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
-        key=editor_key,
+        key=f"editor_{selected_sheet}",
     )
 
     # Clean the edited inputs immediately
     cleaned_df = clean_invalid_entries(edited_df)
 
     # ========================================================
-    # SAFE SAVE CHANGES BACK TO SESSION STATE
+    # SAVE CHANGES BACK TO SESSION STATE
     # ========================================================
 
     if st.button(f"💾 Save Changes - {selected_sheet}"):
         original = sheets[selected_sheet].copy()
 
-        # Convert all target columns in original sheet to flexible object dtype
-        for col in editable_columns:
-            if col in original.columns:
-                original[col] = original[col].astype(object)
-
         code_col = find_column(original, KPI_CODE_ALIASES)
 
         if code_col:
-            for _, row in cleaned_df.iterrows():
+            for idx, row in cleaned_df.iterrows():
                 kpi_code = str(row[code_col])
                 mask = original[code_col].astype(str) == kpi_code
 
@@ -394,18 +353,15 @@ if uploaded_file:
                     for col in editable_columns:
                         if col in cleaned_df.columns:
                             val = row[col]
-                            if pd.isna(val):
-                                val = np.nan
-                            original.loc[mask, col] = val
+                            original.loc[mask, col] = (
+                                np.nan if pd.isna(val) else val
+                            )
         else:
             original = cleaned_df.copy()
 
-        # Final cleaning pass to verify all rows adhere to periodicity rules
+        # Final sanitization pass before updating session state
         original = clean_invalid_entries(original)
-
-        # Update persistent state & increment version key to trigger clean re-render
         st.session_state["kpi_sheets"][selected_sheet] = original
-        st.session_state["editor_version"] = version + 1
 
         st.success(f"Changes saved successfully for sheet '{selected_sheet}'!")
         st.rerun()
@@ -415,7 +371,6 @@ if uploaded_file:
 # ============================================================
 
 st.markdown("---")
-
 st.subheader("📥 Export Updated Workbook")
 
 
@@ -425,7 +380,9 @@ def export_workbook(all_sheets):
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for sheet_name, data in all_sheets.items():
             cleaned_sheet_data = clean_invalid_entries(data)
-            cleaned_sheet_data.to_excel(writer, sheet_name=sheet_name, index=False)
+            cleaned_sheet_data.to_excel(
+                writer, sheet_name=sheet_name, index=False
+            )
 
         protect_workbook(writer.book)
 
@@ -435,7 +392,6 @@ def export_workbook(all_sheets):
 
 if uploaded_file:
     export_file = export_workbook(st.session_state["kpi_sheets"])
-
     new_name = (
         uploaded_file.name.replace(".xlsx", "").replace(".xlsm", "")
         + "_Updated.xlsx"
