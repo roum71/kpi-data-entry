@@ -15,7 +15,7 @@ st.set_page_config(
 
 st.title("📊 KPI Data Entry System")
 st.caption(
-    "Two-sheet KPI data entry with validation, evidence tracking, and comments."
+    "Multi-sheet KPI data entry with periodicity validation, text evidence tracking, and comments."
 )
 
 # ============================================================
@@ -24,9 +24,7 @@ st.caption(
 
 MONTH_COLUMNS = [str(i) for i in range(1, 13)]
 
-ENTRY_SHEETS = ["Entry", "Entry_2"]
-
-# Password protection
+# Password protection for exported files
 EXPORT_PASSWORD = "KPi#Secure2026!Lock"
 
 
@@ -57,7 +55,15 @@ KPI_CODE_ALIASES = ["KPI Code", "kpi_code", "Code", "code"]
 
 KPI_NAME_ALIASES = ["KPI Name", "KPI Name (AR)", "kpi_name", "name"]
 
-EVIDENCE_ALIASES = ["Evidence Status", "evidence_status", "Evidence", "حالة الدليل"]
+EVIDENCE_ALIASES = [
+    "Evidence Status",
+    "evidence_status",
+    "Evidence",
+    "evodence",
+    "حالة الدليل",
+    "Status",
+    "status",
+]
 
 COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
 
@@ -103,19 +109,19 @@ def get_value(row, aliases, default=None):
 def allowed_months(periodicity):
     val = str(periodicity).strip().upper()
 
-    # Monthly (1, M, Monthly) -> Months 1 to 12
+    # Monthly (1, M, Monthly) -> 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
     if val in ["1", "M", "MONTHLY"]:
         return MONTH_COLUMNS
 
-    # Quarterly (2, Q, Quarterly) -> Months 3, 6, 9, 12
+    # Quarterly (2, Q, Quarterly) -> 3, 6, 9, 12 ONLY
     elif val in ["2", "Q", "QUARTERLY"]:
         return ["3", "6", "9", "12"]
 
-    # Semi-Annual (3, S, SA, Semi Annual) -> Months 6, 12
+    # Semi-Annual (3, S, SA, Semi Annual) -> 6, 12 ONLY
     elif val in ["3", "S", "SA", "SEMI ANNUAL", "SEMI-ANNUAL"]:
         return ["6", "12"]
 
-    # Annual (4, A, Annual, Annually) -> Month 12
+    # Annual (4, A, Annual, Annually) -> 12 ONLY
     elif val in ["4", "A", "ANNUAL", "ANNUALLY", "Y", "YEARLY"]:
         return ["12"]
 
@@ -137,7 +143,7 @@ def allowed_months(periodicity):
 
 
 # ============================================================
-# VALIDATION ENGINE
+# STRICT VALIDATION ENGINE
 # ============================================================
 
 
@@ -146,8 +152,8 @@ def validate_entries(df):
     errors = []
 
     for idx, row in df.iterrows():
-        periodicity = get_value(row, FREQUENCY_ALIASES, 1)
-        kpi_code = get_value(row, KPI_CODE_ALIASES, "")
+        periodicity = get_value(row, FREQUENCY_ALIASES, "M")
+        kpi_code = get_value(row, KPI_CODE_ALIASES, f"Row {idx + 1}")
         valid_months = allowed_months(periodicity)
 
         for month in MONTH_COLUMNS:
@@ -156,33 +162,31 @@ def validate_entries(df):
 
             value = row[month]
 
-            # Lock invalid months
+            # Reject & clear inputs in unallowed months for row's periodicity
             if month not in valid_months:
                 if pd.notna(value) and str(value).strip() != "":
                     errors.append({
                         "KPI": kpi_code,
+                        "Periodicity": periodicity,
                         "Month": month,
-                        "Error": (
-                            f"Month {month} not allowed for periodicity"
-                            f" {periodicity}"
-                        ),
+                        "Error": f"Month {month} input rejected for periodicity '{periodicity}'",
                     })
-
-                df.loc[idx, month] = np.nan
+                    df.loc[idx, month] = np.nan
                 continue
 
-            # Empty value
+            # Skip empty inputs for valid months
             if pd.isna(value) or str(value).strip() == "":
                 continue
 
-            # Numeric validation
+            # Ensure numbers only for valid months
             try:
                 df.loc[idx, month] = float(value)
             except Exception:
                 errors.append({
                     "KPI": kpi_code,
+                    "Periodicity": periodicity,
                     "Month": month,
-                    "Error": "Only numeric values are allowed",
+                    "Error": "Non-numeric input rejected",
                 })
                 df.loc[idx, month] = np.nan
 
@@ -229,7 +233,7 @@ uploaded_file = st.file_uploader(
 
 
 if uploaded_file:
-    # Load workbook once
+    # Load workbook sheets dynamically into session state
     if (
         "kpi_sheets" not in st.session_state
         or st.session_state.get("filename") != uploaded_file.name
@@ -242,16 +246,15 @@ if uploaded_file:
     st.success("Workbook loaded successfully")
 
     # ========================================================
-    # SELECT ENTRY SHEET
+    # SELECT ENTRY SHEET (Supports all available sheets)
     # ========================================================
 
     available_sheets = list(sheets.keys())
-
     selected_sheet = st.selectbox("Select Entry Sheet", available_sheets)
 
     df = sheets[selected_sheet].copy()
 
-    # Ensure header column names are strictly strings
+    # Standardize header column names to clean strings
     df.columns = [str(c).strip() for c in df.columns]
 
     # ========================================================
@@ -264,7 +267,6 @@ if uploaded_file:
 
     with c1:
         year_col = find_column(df, YEAR_ALIASES)
-
         if year_col:
             years = sorted(df[year_col].dropna().astype(str).unique())
             selected_year = st.selectbox("Year", ["All"] + years)
@@ -273,7 +275,6 @@ if uploaded_file:
 
     with c2:
         location_col = find_column(df, LOCATION_ALIASES)
-
         if location_col:
             locations = sorted(df[location_col].dropna().astype(str).unique())
             selected_location = st.selectbox("Location", ["All"] + locations)
@@ -282,7 +283,6 @@ if uploaded_file:
 
     with c3:
         periodicity_col = find_column(df, FREQUENCY_ALIASES)
-
         if periodicity_col:
             frequencies = sorted(
                 df[periodicity_col].dropna().astype(str).unique()
@@ -315,15 +315,13 @@ if uploaded_file:
         ]
 
     # ========================================================
-    # DATA EDITOR CONFIGURATION & DYNAMIC COLUMN HIDING
+    # DYNAMIC COLUMN VISIBILITY
     # ========================================================
 
     st.subheader("📝 KPI Data Entry")
 
-    # Determine allowable display months based on selected periodicity
     valid_display_months = allowed_months(selected_periodicity)
 
-    # Filter display columns to show only allowed months for selected periodicity
     cols_to_display = []
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
@@ -334,6 +332,7 @@ if uploaded_file:
 
     filtered_df = filtered_df[cols_to_display]
 
+    # Define editable columns (Month values, Evidence, Status, and Comments)
     editable_columns = []
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
@@ -343,24 +342,32 @@ if uploaded_file:
         elif col in COMMENT_ALIASES:
             editable_columns.append(col)
 
-    # Convert month columns explicitly to float64 for numeric entry
-    for month in MONTH_COLUMNS:
-        if month in filtered_df.columns:
-            filtered_df[month] = pd.to_numeric(
-                filtered_df[month], errors="coerce"
+    # Format data types
+    for col in filtered_df.columns:
+        if col in MONTH_COLUMNS:
+            filtered_df[col] = pd.to_numeric(
+                filtered_df[col], errors="coerce"
+            )
+        elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
+            filtered_df[col] = (
+                filtered_df[col].fillna("").astype(str)
             )
 
-    # Prepare disabled columns list for native Streamlit disabling
+    # Disable metadata columns
     disabled_columns = [
         col for col in filtered_df.columns if col not in editable_columns
     ]
 
-    # Only define explicit column config for active month columns
+    # Column UI Configuration
     column_config = {}
-    for month in MONTH_COLUMNS:
-        if month in filtered_df.columns:
-            column_config[month] = st.column_config.NumberColumn(
-                month, format="%g"
+    for col in filtered_df.columns:
+        if col in MONTH_COLUMNS:
+            column_config[col] = st.column_config.NumberColumn(
+                col, format="%g"
+            )
+        elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
+            column_config[col] = st.column_config.TextColumn(
+                col, help="Editable text field"
             )
 
     edited_df = st.data_editor(
@@ -374,19 +381,21 @@ if uploaded_file:
     )
 
     # ========================================================
-    # VALIDATE AFTER EDIT
+    # VALIDATE AND DISCARD INVALID ENTRIES AFTER EDIT
     # ========================================================
 
     validated_df, errors = validate_entries(edited_df)
 
     if errors:
-        st.warning(f"{len(errors)} invalid entries detected")
+        st.error(
+            f"⚠️ {len(errors)} invalid entry attempts detected and reset!"
+        )
 
-        with st.expander("View Errors"):
+        with st.expander("View Rejected Entries"):
             st.dataframe(pd.DataFrame(errors), use_container_width=True)
 
     # ========================================================
-    # SAVE CHANGES BACK TO SHEET
+    # SAVE CHANGES BACK TO SESSION STATE
     # ========================================================
 
     if st.button(f"💾 Save Changes - {selected_sheet}"):
@@ -407,10 +416,10 @@ if uploaded_file:
 
         st.session_state["kpi_sheets"][selected_sheet] = original
 
-        st.success("Changes saved successfully")
+        st.success(f"Changes saved successfully for sheet '{selected_sheet}'!")
 
 # ============================================================
-# EXPORT UPDATED WORKBOOK
+# EXPORT WORKBOOK
 # ============================================================
 
 st.markdown("---")
