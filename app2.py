@@ -149,7 +149,8 @@ def allowed_months(periodicity):
 def clean_invalid_entries(df):
     df = df.copy()
 
-    for idx, row in df.iterrows():
+    for idx in df.index:
+        row = df.loc[idx]
         periodicity = get_value(row, FREQUENCY_ALIASES, "M")
         valid_months = allowed_months(periodicity)
 
@@ -317,6 +318,9 @@ if uploaded_file:
 
     filtered_df = filtered_df[cols_to_display]
 
+    # Clean again right before UI display to erase invalid pre-existing data
+    filtered_df = clean_invalid_entries(filtered_df)
+
     # Define editable columns
     editable_columns = []
     for col in filtered_df.columns:
@@ -364,28 +368,15 @@ if uploaded_file:
         key=editor_key,
     )
 
-    # Force cleaning on post-edited data frame
+    # Clean the edited results immediately
     cleaned_df = clean_invalid_entries(edited_df)
 
-    # Purge invalid edits directly from Streamlit session state widget cache
-    if editor_key in st.session_state and "edited_rows" in st.session_state[editor_key]:
-        edited_rows = st.session_state[editor_key]["edited_rows"]
-        for row_idx, changes in list(edited_rows.items()):
-            row = cleaned_df.iloc[row_idx]
-            periodicity = get_value(row, FREQUENCY_ALIASES, "M")
-            allowed = allowed_months(periodicity)
-
-            for col_name in list(changes.keys()):
-                if col_name in MONTH_COLUMNS and col_name not in allowed:
-                    del changes[col_name]
-
     # ========================================================
-    # SAVE CHANGES BACK TO SESSION STATE
+    # SAFE SAVE CHANGES BACK TO SESSION STATE
     # ========================================================
 
     if st.button(f"💾 Save Changes - {selected_sheet}"):
         original = sheets[selected_sheet].copy()
-
         code_col = find_column(original, KPI_CODE_ALIASES)
 
         if code_col:
@@ -393,13 +384,18 @@ if uploaded_file:
                 kpi_code = str(row[code_col])
                 mask = original[code_col].astype(str) == kpi_code
 
-                for col in editable_columns:
-                    if col in cleaned_df.columns:
-                        original.loc[mask, col] = row[col]
+                if mask.any():
+                    for col in editable_columns:
+                        if col in cleaned_df.columns:
+                            # Safely write value to prevent type assignment errors
+                            val = row[col]
+                            if pd.isna(val):
+                                val = np.nan
+                            original.loc[mask, col] = val
         else:
             original = cleaned_df.copy()
 
-        # Clean whole sheet before saving state
+        # Final sanitization pass before saving state
         original = clean_invalid_entries(original)
         st.session_state["kpi_sheets"][selected_sheet] = original
 
