@@ -15,7 +15,7 @@ st.set_page_config(
 
 st.title("📊 KPI Data Entry System")
 st.caption(
-    "Multi-sheet KPI data entry with periodicity validation, text evidence tracking, and comments."
+    "Multi-sheet KPI data entry with strict periodicity validation, text evidence tracking, and comments."
 )
 
 # ============================================================
@@ -24,7 +24,6 @@ st.caption(
 
 MONTH_COLUMNS = [str(i) for i in range(1, 13)]
 
-# Password protection for exported files
 EXPORT_PASSWORD = "KPi#Secure2026!Lock"
 
 
@@ -109,7 +108,7 @@ def get_value(row, aliases, default=None):
 def allowed_months(periodicity):
     val = str(periodicity).strip().upper()
 
-    # Monthly (1, M, Monthly) -> 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12
+    # Monthly (1, M, Monthly) -> 1 to 12
     if val in ["1", "M", "MONTHLY"]:
         return MONTH_COLUMNS
 
@@ -160,7 +159,7 @@ def clean_invalid_entries(df):
 
             value = row[month]
 
-            # Silently clear values in invalid months for row periodicity
+            # Clear values entered into disallowed months for this row's periodicity
             if month not in valid_months:
                 df.loc[idx, month] = np.nan
                 continue
@@ -169,7 +168,7 @@ def clean_invalid_entries(df):
             if pd.isna(value) or str(value).strip() == "":
                 continue
 
-            # Silently clear non-numeric inputs
+            # Clear non-numeric inputs
             try:
                 df.loc[idx, month] = float(value)
             except Exception:
@@ -231,16 +230,17 @@ if uploaded_file:
     st.success("Workbook loaded successfully")
 
     # ========================================================
-    # SELECT ENTRY SHEET (Supports all available sheets)
+    # SELECT ENTRY SHEET
     # ========================================================
 
     available_sheets = list(sheets.keys())
     selected_sheet = st.selectbox("Select Entry Sheet", available_sheets)
 
     df = sheets[selected_sheet].copy()
-
-    # Standardize header column names to clean strings
     df.columns = [str(c).strip() for c in df.columns]
+
+    # Clean existing data upon loading view
+    df = clean_invalid_entries(df)
 
     # ========================================================
     # FILTERS
@@ -300,7 +300,7 @@ if uploaded_file:
         ]
 
     # ========================================================
-    # DYNAMIC COLUMN VISIBILITY
+    # DYNAMIC COLUMN VISIBILITY & DATA EDITOR
     # ========================================================
 
     st.subheader("📝 KPI Data Entry")
@@ -317,7 +317,7 @@ if uploaded_file:
 
     filtered_df = filtered_df[cols_to_display]
 
-    # Define editable columns (Month values, Evidence, Status, and Comments)
+    # Define editable columns
     editable_columns = []
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
@@ -327,23 +327,19 @@ if uploaded_file:
         elif col in COMMENT_ALIASES:
             editable_columns.append(col)
 
-    # Format data types
+    # Enforce data types for rendering
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
             filtered_df[col] = pd.to_numeric(
                 filtered_df[col], errors="coerce"
             )
         elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
-            filtered_df[col] = (
-                filtered_df[col].fillna("").astype(str)
-            )
+            filtered_df[col] = filtered_df[col].fillna("").astype(str)
 
-    # Disable metadata columns
     disabled_columns = [
         col for col in filtered_df.columns if col not in editable_columns
     ]
 
-    # Column UI Configuration
     column_config = {}
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
@@ -355,6 +351,9 @@ if uploaded_file:
                 col, help="Editable text field"
             )
 
+    editor_key = f"editor_{selected_sheet}"
+
+    # Render data editor
     edited_df = st.data_editor(
         filtered_df,
         column_config=column_config,
@@ -362,11 +361,23 @@ if uploaded_file:
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
-        key=f"editor_{selected_sheet}",
+        key=editor_key,
     )
 
-    # Automatically clean invalid inputs without warning dialogs
+    # Force cleaning on post-edited data frame
     cleaned_df = clean_invalid_entries(edited_df)
+
+    # Purge invalid edits directly from Streamlit session state widget cache
+    if editor_key in st.session_state and "edited_rows" in st.session_state[editor_key]:
+        edited_rows = st.session_state[editor_key]["edited_rows"]
+        for row_idx, changes in list(edited_rows.items()):
+            row = cleaned_df.iloc[row_idx]
+            periodicity = get_value(row, FREQUENCY_ALIASES, "M")
+            allowed = allowed_months(periodicity)
+
+            for col_name in list(changes.keys()):
+                if col_name in MONTH_COLUMNS and col_name not in allowed:
+                    del changes[col_name]
 
     # ========================================================
     # SAVE CHANGES BACK TO SESSION STATE
@@ -388,9 +399,12 @@ if uploaded_file:
         else:
             original = cleaned_df.copy()
 
+        # Clean whole sheet before saving state
+        original = clean_invalid_entries(original)
         st.session_state["kpi_sheets"][selected_sheet] = original
 
         st.success(f"Changes saved successfully for sheet '{selected_sheet}'!")
+        st.rerun()
 
 # ============================================================
 # EXPORT WORKBOOK
@@ -406,7 +420,8 @@ def export_workbook(all_sheets):
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         for sheet_name, data in all_sheets.items():
-            data.to_excel(writer, sheet_name=sheet_name, index=False)
+            cleaned_sheet_data = clean_invalid_entries(data)
+            cleaned_sheet_data.to_excel(writer, sheet_name=sheet_name, index=False)
 
         protect_workbook(writer.book)
 
