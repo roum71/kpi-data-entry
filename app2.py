@@ -240,6 +240,9 @@ if uploaded_file:
 
     df = sheets[selected_sheet].copy()
 
+    # Ensure header column names are strictly strings
+    df.columns = [str(c).strip() for c in df.columns]
+
     # ========================================================
     # FILTERS
     # ========================================================
@@ -301,7 +304,7 @@ if uploaded_file:
         ]
 
     # ========================================================
-    # DISPLAY CONTROL
+    # DATA EDITOR CONFIGURATION
     # ========================================================
 
     st.subheader("📝 KPI Data Entry")
@@ -316,35 +319,30 @@ if uploaded_file:
         elif col in COMMENT_ALIASES:
             editable_columns.append(col)
 
-    display_columns = list(filtered_df.columns)
-
-    # ========================================================
-    # DATA EDITOR CONFIGURATION & DTYPE FIX
-    # ========================================================
-
-    # Convert month columns explicitly to numeric (float64) so Streamlit doesn't raise a type mismatch error
+    # Convert month columns explicitly to float64 for numeric entry
     for month in MONTH_COLUMNS:
         if month in filtered_df.columns:
             filtered_df[month] = pd.to_numeric(
                 filtered_df[month], errors="coerce"
             )
 
-    column_config = {}
+    # Prepare disabled columns list for native Streamlit disabling
+    disabled_columns = [
+        col for col in filtered_df.columns if col not in editable_columns
+    ]
 
-    for col in display_columns:
-        if col in editable_columns:
-            if col in MONTH_COLUMNS:
-                column_config[col] = st.column_config.NumberColumn(col)
-            else:
-                column_config[col] = st.column_config.TextColumn(col)
-        else:
-            column_config[col] = st.column_config.TextColumn(
-                col, disabled=True
+    # Only define explicit column config for month columns
+    column_config = {}
+    for month in MONTH_COLUMNS:
+        if month in filtered_df.columns:
+            column_config[month] = st.column_config.NumberColumn(
+                month, format="%g"
             )
 
     edited_df = st.data_editor(
         filtered_df,
         column_config=column_config,
+        disabled=disabled_columns,
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
@@ -374,8 +372,8 @@ if uploaded_file:
 
         if code_col:
             for _, row in validated_df.iterrows():
-                kpi_code = row[code_col]
-                mask = original[code_col] == kpi_code
+                kpi_code = str(row[code_col])
+                mask = original[code_col].astype(str) == kpi_code
 
                 for col in editable_columns:
                     if col in validated_df.columns:
