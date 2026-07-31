@@ -107,19 +107,19 @@ def allowed_months(periodicity):
         return MONTH_COLUMNS
 
     if p == 1:
-        # Monthly
+        # Monthly: 1 to 12
         return MONTH_COLUMNS
 
     elif p == 2:
-        # Quarterly
+        # Quarterly: 3, 6, 9, 12
         return ["3", "6", "9", "12"]
 
     elif p == 3:
-        # Semi Annual
+        # Semi Annual: 6, 12
         return ["6", "12"]
 
     elif p == 4:
-        # Annual
+        # Annual: 12
         return ["12"]
 
     return MONTH_COLUMNS
@@ -304,13 +304,26 @@ if uploaded_file:
         ]
 
     # ========================================================
-    # DATA EDITOR CONFIGURATION
+    # DATA EDITOR CONFIGURATION & DYNAMIC COLUMN HIDING
     # ========================================================
 
     st.subheader("📝 KPI Data Entry")
 
-    editable_columns = []
+    # Determine allowable display months based on selected periodicity
+    valid_display_months = allowed_months(selected_periodicity)
 
+    # Filter display columns to exclude invalid months for the selected filter
+    cols_to_display = []
+    for col in filtered_df.columns:
+        if col in MONTH_COLUMNS:
+            if selected_periodicity == "All" or col in valid_display_months:
+                cols_to_display.append(col)
+        else:
+            cols_to_display.append(col)
+
+    filtered_df = filtered_df[cols_to_display]
+
+    editable_columns = []
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
             editable_columns.append(col)
@@ -331,7 +344,7 @@ if uploaded_file:
         col for col in filtered_df.columns if col not in editable_columns
     ]
 
-    # Only define explicit column config for month columns
+    # Only define explicit column config for active month columns
     column_config = {}
     for month in MONTH_COLUMNS:
         if month in filtered_df.columns:
