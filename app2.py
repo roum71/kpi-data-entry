@@ -160,16 +160,17 @@ def clean_invalid_entries(df):
 
             value = row[month]
 
-            # Clear values entered into disallowed months for this row's periodicity
+            # Silently erase entries in unallowed months for this row's periodicity
             if month not in valid_months:
                 df.loc[idx, month] = np.nan
                 continue
 
             # Skip empty inputs for valid months
             if pd.isna(value) or str(value).strip() == "":
+                df.loc[idx, month] = np.nan
                 continue
 
-            # Clear non-numeric inputs
+            # Erase non-numeric inputs
             try:
                 df.loc[idx, month] = float(value)
             except Exception:
@@ -202,6 +203,12 @@ def load_sheets(uploaded_file):
     for sheet in excel.sheet_names:
         df = pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
         df.columns = [clean_header(c) for c in df.columns]
+
+        # Convert month columns to object to avoid Pandas strict type lock errors
+        for col in df.columns:
+            if str(col).strip() in MONTH_COLUMNS:
+                df[col] = df[col].astype(object)
+
         df = clean_invalid_entries(df)
         sheets[sheet] = df
 
@@ -225,6 +232,7 @@ if uploaded_file:
     ):
         st.session_state["kpi_sheets"] = load_sheets(uploaded_file)
         st.session_state["filename"] = uploaded_file.name
+        st.session_state["editor_version"] = 0
 
     sheets = st.session_state["kpi_sheets"]
 
@@ -318,7 +326,7 @@ if uploaded_file:
 
     filtered_df = filtered_df[cols_to_display]
 
-    # Clean again right before UI display to erase invalid pre-existing data
+    # Pre-clean filtered view before rendering to user
     filtered_df = clean_invalid_entries(filtered_df)
 
     # Define editable columns
@@ -330,15 +338,6 @@ if uploaded_file:
             editable_columns.append(col)
         elif col in COMMENT_ALIASES:
             editable_columns.append(col)
-
-    # Enforce data types for rendering
-    for col in filtered_df.columns:
-        if col in MONTH_COLUMNS:
-            filtered_df[col] = pd.to_numeric(
-                filtered_df[col], errors="coerce"
-            )
-        elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
-            filtered_df[col] = filtered_df[col].fillna("").astype(str)
 
     disabled_columns = [
         col for col in filtered_df.columns if col not in editable_columns
@@ -355,7 +354,8 @@ if uploaded_file:
                 col, help="Editable text field"
             )
 
-    editor_key = f"editor_{selected_sheet}"
+    version = st.session_state.get("editor_version", 0)
+    editor_key = f"editor_{selected_sheet}_{version}"
 
     # Render data editor
     edited_df = st.data_editor(
@@ -368,7 +368,7 @@ if uploaded_file:
         key=editor_key,
     )
 
-    # Clean the edited results immediately
+    # Clean the edited inputs immediately
     cleaned_df = clean_invalid_entries(edited_df)
 
     # ========================================================
@@ -377,6 +377,12 @@ if uploaded_file:
 
     if st.button(f"💾 Save Changes - {selected_sheet}"):
         original = sheets[selected_sheet].copy()
+
+        # Convert all target columns in original sheet to flexible object dtype
+        for col in editable_columns:
+            if col in original.columns:
+                original[col] = original[col].astype(object)
+
         code_col = find_column(original, KPI_CODE_ALIASES)
 
         if code_col:
@@ -387,7 +393,6 @@ if uploaded_file:
                 if mask.any():
                     for col in editable_columns:
                         if col in cleaned_df.columns:
-                            # Safely write value to prevent type assignment errors
                             val = row[col]
                             if pd.isna(val):
                                 val = np.nan
@@ -395,9 +400,12 @@ if uploaded_file:
         else:
             original = cleaned_df.copy()
 
-        # Final sanitization pass before saving state
+        # Final cleaning pass to verify all rows adhere to periodicity rules
         original = clean_invalid_entries(original)
+
+        # Update persistent state & increment version key to trigger clean re-render
         st.session_state["kpi_sheets"][selected_sheet] = original
+        st.session_state["editor_version"] = version + 1
 
         st.success(f"Changes saved successfully for sheet '{selected_sheet}'!")
         st.rerun()
