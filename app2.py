@@ -143,17 +143,15 @@ def allowed_months(periodicity):
 
 
 # ============================================================
-# STRICT VALIDATION ENGINE
+# SILENT AUTO-CLEAR VALIDATION ENGINE
 # ============================================================
 
 
-def validate_entries(df):
+def clean_invalid_entries(df):
     df = df.copy()
-    errors = []
 
     for idx, row in df.iterrows():
         periodicity = get_value(row, FREQUENCY_ALIASES, "M")
-        kpi_code = get_value(row, KPI_CODE_ALIASES, f"Row {idx + 1}")
         valid_months = allowed_months(periodicity)
 
         for month in MONTH_COLUMNS:
@@ -162,35 +160,22 @@ def validate_entries(df):
 
             value = row[month]
 
-            # Reject & clear inputs in unallowed months for row's periodicity
+            # Silently clear values in invalid months for row periodicity
             if month not in valid_months:
-                if pd.notna(value) and str(value).strip() != "":
-                    errors.append({
-                        "KPI": kpi_code,
-                        "Periodicity": periodicity,
-                        "Month": month,
-                        "Error": f"Month {month} input rejected for periodicity '{periodicity}'",
-                    })
-                    df.loc[idx, month] = np.nan
+                df.loc[idx, month] = np.nan
                 continue
 
             # Skip empty inputs for valid months
             if pd.isna(value) or str(value).strip() == "":
                 continue
 
-            # Ensure numbers only for valid months
+            # Silently clear non-numeric inputs
             try:
                 df.loc[idx, month] = float(value)
             except Exception:
-                errors.append({
-                    "KPI": kpi_code,
-                    "Periodicity": periodicity,
-                    "Month": month,
-                    "Error": "Non-numeric input rejected",
-                })
                 df.loc[idx, month] = np.nan
 
-    return df, errors
+    return df
 
 
 # ============================================================
@@ -217,7 +202,7 @@ def load_sheets(uploaded_file):
     for sheet in excel.sheet_names:
         df = pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
         df.columns = [clean_header(c) for c in df.columns]
-        df, _ = validate_entries(df)
+        df = clean_invalid_entries(df)
         sheets[sheet] = df
 
     return sheets
@@ -380,19 +365,8 @@ if uploaded_file:
         key=f"editor_{selected_sheet}",
     )
 
-    # ========================================================
-    # VALIDATE AND DISCARD INVALID ENTRIES AFTER EDIT
-    # ========================================================
-
-    validated_df, errors = validate_entries(edited_df)
-
-    if errors:
-        st.error(
-            f"⚠️ {len(errors)} invalid entry attempts detected and reset!"
-        )
-
-        with st.expander("View Rejected Entries"):
-            st.dataframe(pd.DataFrame(errors), use_container_width=True)
+    # Automatically clean invalid inputs without warning dialogs
+    cleaned_df = clean_invalid_entries(edited_df)
 
     # ========================================================
     # SAVE CHANGES BACK TO SESSION STATE
@@ -404,15 +378,15 @@ if uploaded_file:
         code_col = find_column(original, KPI_CODE_ALIASES)
 
         if code_col:
-            for _, row in validated_df.iterrows():
+            for _, row in cleaned_df.iterrows():
                 kpi_code = str(row[code_col])
                 mask = original[code_col].astype(str) == kpi_code
 
                 for col in editable_columns:
-                    if col in validated_df.columns:
+                    if col in cleaned_df.columns:
                         original.loc[mask, col] = row[col]
         else:
-            original = validated_df.copy()
+            original = cleaned_df.copy()
 
         st.session_state["kpi_sheets"][selected_sheet] = original
 
