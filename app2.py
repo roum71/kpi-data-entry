@@ -101,26 +101,37 @@ def get_value(row, aliases, default=None):
 
 
 def allowed_months(periodicity):
-    try:
-        p = int(float(periodicity))
-    except Exception:
+    val = str(periodicity).strip().upper()
+
+    # Monthly (1, M, Monthly) -> Months 1 to 12
+    if val in ["1", "M", "MONTHLY"]:
         return MONTH_COLUMNS
 
-    if p == 1:
-        # Monthly: 1 to 12
-        return MONTH_COLUMNS
-
-    elif p == 2:
-        # Quarterly: 3, 6, 9, 12
+    # Quarterly (2, Q, Quarterly) -> Months 3, 6, 9, 12
+    elif val in ["2", "Q", "QUARTERLY"]:
         return ["3", "6", "9", "12"]
 
-    elif p == 3:
-        # Semi Annual: 6, 12
+    # Semi-Annual (3, S, SA, Semi Annual) -> Months 6, 12
+    elif val in ["3", "S", "SA", "SEMI ANNUAL", "SEMI-ANNUAL"]:
         return ["6", "12"]
 
-    elif p == 4:
-        # Annual: 12
+    # Annual (4, A, Annual, Annually) -> Month 12
+    elif val in ["4", "A", "ANNUAL", "ANNUALLY", "Y", "YEARLY"]:
         return ["12"]
+
+    # Fallback numerical check
+    try:
+        p = int(float(val))
+        if p == 1:
+            return MONTH_COLUMNS
+        elif p == 2:
+            return ["3", "6", "9", "12"]
+        elif p == 3:
+            return ["6", "12"]
+        elif p == 4:
+            return ["12"]
+    except Exception:
+        pass
 
     return MONTH_COLUMNS
 
@@ -312,7 +323,7 @@ if uploaded_file:
     # Determine allowable display months based on selected periodicity
     valid_display_months = allowed_months(selected_periodicity)
 
-    # Filter display columns to exclude invalid months for the selected filter
+    # Filter display columns to show only allowed months for selected periodicity
     cols_to_display = []
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
