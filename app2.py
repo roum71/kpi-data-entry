@@ -87,11 +87,6 @@ def get_value(row, aliases, default=None):
     return default
 
 
-# ============================================================
-# PERIODICITY RULES
-# ============================================================
-
-
 def allowed_months(periodicity):
     val = str(periodicity).strip().upper()
 
@@ -120,15 +115,8 @@ def allowed_months(periodicity):
     return MONTH_COLUMNS
 
 
-# ============================================================
-# SILENT AUTO-CLEAR VALIDATION ENGINE
-# ============================================================
-
-
 def clean_invalid_entries(df):
     df = df.copy()
-
-    # Enforce float64 for month columns to ensure Streamlit NumberColumn compatibility
     for m in MONTH_COLUMNS:
         if m in df.columns:
             df[m] = pd.to_numeric(df[m], errors="coerce").astype("float64")
@@ -141,29 +129,10 @@ def clean_invalid_entries(df):
         for month in MONTH_COLUMNS:
             if month not in df.columns:
                 continue
-
-            # Clear values entered into disallowed months for this row's periodicity
             if month not in valid_months:
                 df.loc[idx, month] = np.nan
 
     return df
-
-
-# ============================================================
-# EXCEL PROTECTION
-# ============================================================
-
-
-def protect_workbook(workbook):
-    for ws in workbook.worksheets:
-        ws.protection.sheet = True
-        ws.protection.password = EXPORT_PASSWORD
-        ws.protection.enable()
-
-
-# ============================================================
-# LOAD WORKBOOK
-# ============================================================
 
 
 def load_sheets(uploaded_file):
@@ -174,7 +143,6 @@ def load_sheets(uploaded_file):
         df = pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
         df.columns = [clean_header(c) for c in df.columns]
 
-        # Explicitly setup dtypes
         for col in df.columns:
             col_str = str(col).strip()
             if col_str in MONTH_COLUMNS:
@@ -209,24 +177,16 @@ if uploaded_file:
     sheets = st.session_state["kpi_sheets"]
     st.success("Workbook loaded successfully")
 
-    # ========================================================
-    # SELECT ENTRY SHEET
-    # ========================================================
-
     available_sheets = list(sheets.keys())
     selected_sheet = st.selectbox("Select Entry Sheet", available_sheets)
 
     df = sheets[selected_sheet].copy()
     df.columns = [str(c).strip() for c in df.columns]
-
     df = clean_invalid_entries(df)
 
-    # ========================================================
-    # FILTERS
-    # ========================================================
-
+    # Filters
     st.subheader("🔎 Filters")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
 
     with c1:
         year_col = find_column(df, YEAR_ALIASES)
@@ -244,180 +204,85 @@ if uploaded_file:
         else:
             selected_location = "All"
 
-    with c3:
-        periodicity_col = find_column(df, FREQUENCY_ALIASES)
-        if periodicity_col:
-            frequencies = sorted(
-                df[periodicity_col].dropna().astype(str).unique()
-            )
-            selected_periodicity = st.selectbox(
-                "Periodicity", ["All"] + frequencies
-            )
-        else:
-            selected_periodicity = "All"
-
-    # ========================================================
-    # APPLY FILTERS
-    # ========================================================
-
+    # Apply Filters
     filtered_df = df.copy()
-
     if selected_year != "All" and year_col:
         filtered_df = filtered_df[
             filtered_df[year_col].astype(str) == selected_year
         ]
-
     if selected_location != "All" and location_col:
         filtered_df = filtered_df[
             filtered_df[location_col].astype(str) == selected_location
         ]
 
-    if selected_periodicity != "All" and periodicity_col:
-        filtered_df = filtered_df[
-            filtered_df[periodicity_col].astype(str) == selected_periodicity
-        ]
-
-    # ========================================================
-    # DYNAMIC COLUMN VISIBILITY & HARDENED DATA EDITOR
-    # ========================================================
-
+    # Data Entry Section
     st.subheader("📝 KPI Data Entry")
 
-    valid_display_months = allowed_months(selected_periodicity)
+    periodicity_col = find_column(filtered_df, FREQUENCY_ALIASES)
 
-    # Filter visible columns dynamically based on periodicity filter
-    cols_to_display = []
-    for col in filtered_df.columns:
-        if col in MONTH_COLUMNS:
-            if selected_periodicity == "All" or col in valid_display_months:
-                cols_to_display.append(col)
-        else:
-            cols_to_display.append(col)
+    # Categorize into tabs by Periodicity to enforce strict cell locking
+    tabs = st.tabs(["Monthly", "Quarterly", "Semi-Annual", "Annual", "All Records"])
 
-    filtered_df = filtered_df[cols_to_display]
-    filtered_df = clean_invalid_entries(filtered_df)
+    tab_configs = [
+        ("Monthly", ["1", "M", "MONTHLY", 1], MONTH_COLUMNS),
+        ("Quarterly", ["2", "Q", "QUARTERLY", 2], ["3", "6", "9", "12"]),
+        ("Semi-Annual", ["3", "S", "SA", "SEMI ANNUAL", "SEMI-ANNUAL", 3], ["6", "12"]),
+        ("Annual", ["4", "A", "ANNUAL", "ANNUALLY", "Y", "YEARLY", 4], ["12"]),
+    ]
 
-    # Determine editable & disabled columns strictly
-    editable_columns = []
-    disabled_columns = []
-
-    for col in filtered_df.columns:
-        if col in MONTH_COLUMNS:
-            # If a specific periodicity is selected, disable non-valid months strictly
-            if selected_periodicity != "All" and col not in valid_display_months:
-                disabled_columns.append(col)
+    for i, (tab_name, match_vals, valid_m) in enumerate(tab_configs):
+        with tabs[i]:
+            if periodicity_col:
+                tab_df = filtered_df[
+                    filtered_df[periodicity_col].astype(str).str.upper().isin([str(v).upper() for v in match_vals])
+                ].copy()
             else:
-                editable_columns.append(col)
-        elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
-            editable_columns.append(col)
-        else:
-            disabled_columns.append(col)
+                tab_df = filtered_df.copy()
 
-    # Configure explicit column types to prevent invalid data types (e.g., text in month cells)
-    column_config = {}
-    for col in filtered_df.columns:
-        if col in MONTH_COLUMNS:
-            column_config[col] = st.column_config.NumberColumn(
-                col, format="%g", help="Numeric KPI value only"
-            )
-        elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
-            column_config[col] = st.column_config.TextColumn(
-                col, help="Editable text field"
-            )
+            if tab_df.empty:
+                st.info(f"No {tab_name} KPIs found.")
+                continue
 
-    # Render data editor
-    edited_df = st.data_editor(
-        filtered_df,
-        column_config=column_config,
-        disabled=disabled_columns,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        key=f"editor_{selected_sheet}_{selected_periodicity}",
-    )
+            # Lock all month columns except valid ones for this tab
+            disabled_cols = []
+            for col in tab_df.columns:
+                if col in MONTH_COLUMNS and col not in valid_m:
+                    disabled_cols.append(col)
+                elif col not in MONTH_COLUMNS and col not in EVIDENCE_ALIASES and col not in COMMENT_ALIASES:
+                    disabled_cols.append(col)
 
-    # Instantly purge invalid inputs (e.g., if "All" periodicities are visible on-screen)
-    cleaned_df = clean_invalid_entries(edited_df)
+            column_config = {}
+            for col in tab_df.columns:
+                if col in MONTH_COLUMNS:
+                    column_config[col] = st.column_config.NumberColumn(col, format="%g")
+                elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
+                    column_config[col] = st.column_config.TextColumn(col)
 
-    # ========================================================
-    # SAVE CHANGES BACK TO SESSION STATE
-    # ========================================================
-
-    if st.button(f"💾 Save Changes - {selected_sheet}"):
-        original = sheets[selected_sheet].copy()
-        code_col = find_column(original, KPI_CODE_ALIASES)
-
-        if code_col:
-            for idx, row in cleaned_df.iterrows():
-                kpi_code = str(row[code_col])
-                mask = original[code_col].astype(str) == kpi_code
-
-                if mask.any():
-                    row_periodicity = get_value(row, FREQUENCY_ALIASES, "M")
-                    valid_m_for_row = allowed_months(row_periodicity)
-
-                    for col in editable_columns:
-                        if col in cleaned_df.columns:
-                            val = row[col]
-
-                            # Strict check: clear value if saved into unauthorized month cell
-                            if col in MONTH_COLUMNS and col not in valid_m_for_row:
-                                val = np.nan
-
-                            original.loc[mask, col] = (
-                                np.nan if pd.isna(val) else val
-                            )
-        else:
-            original = cleaned_df.copy()
-
-        # Final sanitization pass
-        original = clean_invalid_entries(original)
-        st.session_state["kpi_sheets"][selected_sheet] = original
-
-        st.success(f"Changes saved successfully for sheet '{selected_sheet}'!")
-        st.rerun()
-
-# ============================================================
-# EXPORT WORKBOOK
-# ============================================================
-
-st.markdown("---")
-st.subheader("📥 Export Updated Workbook")
-
-
-def export_workbook(all_sheets):
-    output = io.BytesIO()
-
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for sheet_name, data in all_sheets.items():
-            cleaned_sheet_data = clean_invalid_entries(data)
-            cleaned_sheet_data.to_excel(
-                writer, sheet_name=sheet_name, index=False
+            edited_tab_df = st.data_editor(
+                tab_df,
+                column_config=column_config,
+                disabled=disabled_cols,
+                use_container_width=True,
+                hide_index=True,
+                key=f"editor_{selected_sheet}_{tab_name}",
             )
 
-        protect_workbook(writer.book)
+            if st.button(f"💾 Save Changes ({tab_name})", key=f"save_{tab_name}"):
+                cleaned_tab_df = clean_invalid_entries(edited_tab_df)
+                code_col = find_column(df, KPI_CODE_ALIASES)
+                
+                if code_col:
+                    for idx, row in cleaned_tab_df.iterrows():
+                        kpi_code = str(row[code_col])
+                        mask = df[code_col].astype(str) == kpi_code
+                        if mask.any():
+                            for col in tab_df.columns:
+                                if col in MONTH_COLUMNS or col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
+                                    df.loc[mask, col] = row[col]
 
-    output.seek(0)
-    return output
+                st.session_state["kpi_sheets"][selected_sheet] = clean_invalid_entries(df)
+                st.success(f"Saved {tab_name} entries successfully!")
+                st.rerun()
 
-
-if uploaded_file:
-    export_file = export_workbook(st.session_state["kpi_sheets"])
-    new_name = (
-        uploaded_file.name.replace(".xlsx", "").replace(".xlsm", "")
-        + "_Updated.xlsx"
-    )
-
-    st.download_button(
-        label="⬇️ Download Updated KPI Workbook",
-        data=export_file,
-        file_name=new_name,
-        mime=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
-        type="primary",
-        use_container_width=True,
-    )
-
-else:
-    st.info("Upload a workbook to enable export.")
+    with tabs[4]:
+        st.dataframe(filtered_df, use_container_width=True)
