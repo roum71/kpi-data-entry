@@ -279,54 +279,45 @@ if uploaded_file:
 
     st.subheader("📝 KPI Data Entry")
 
-    valid_display_months = allowed_months(selected_periodicity)
+    if selected_periodicity == "All":
+        # VIEW-ONLY MODE WHEN 'ALL' IS SELECTED
+        st.info(
+            "🔒 **View-Only Mode**: Select a specific **Periodicity** above (e.g. Monthly, Quarterly, Semi-Annual, Annual) to enable data entry."
+        )
 
-    cols_to_display = []
-    for col in filtered_df.columns:
-        if col in MONTH_COLUMNS:
-            if selected_periodicity == "All" or col in valid_display_months:
+        cols_to_display = list(filtered_df.columns)
+        disabled_columns = list(filtered_df.columns)  # Lock every column
+        editable_columns = []
+
+    else:
+        # DATA ENTRY MODE FOR SPECIFIC PERIODICITY
+        valid_display_months = allowed_months(selected_periodicity)
+
+        # Show ONLY authorized month columns for this specific frequency
+        cols_to_display = []
+        for col in filtered_df.columns:
+            if col in MONTH_COLUMNS:
+                if col in valid_display_months:
+                    cols_to_display.append(col)
+            else:
                 cols_to_display.append(col)
-        else:
-            cols_to_display.append(col)
+
+        # Enable editing only for month columns + evidence + comments
+        editable_columns = [
+            col
+            for col in cols_to_display
+            if col in MONTH_COLUMNS
+            or col in EVIDENCE_ALIASES
+            or col in COMMENT_ALIASES
+        ]
+        disabled_columns = [
+            col for col in cols_to_display if col not in editable_columns
+        ]
 
     filtered_df = filtered_df[cols_to_display]
     filtered_df = clean_invalid_entries(filtered_df)
 
-    # --------------------------------------------------------
-    # WIDGET STATE INTERCEPTOR & CLEANER
-    # --------------------------------------------------------
-    editor_key = f"editor_{selected_sheet}_{selected_periodicity}"
-
-    if editor_key in st.session_state:
-        edited_data = st.session_state[editor_key].get("edited_rows", {})
-        purged_keys = []
-
-        for row_idx, changes in list(edited_data.items()):
-            if row_idx < len(filtered_df):
-                row = filtered_df.iloc[row_idx]
-                row_p = get_value(row, FREQUENCY_ALIASES, "M")
-                row_allowed = allowed_months(row_p)
-
-                for col_name, new_val in list(changes.items()):
-                    # If user typed into a month column not allowed for this specific row:
-                    if col_name in MONTH_COLUMNS and col_name not in row_allowed:
-                        del st.session_state[editor_key]["edited_rows"][row_idx][col_name]
-                        st.warning(
-                            f"⚠️ Entry rejected: Month {col_name} is not allowed for KPI '{get_value(row, KPI_CODE_ALIASES, 'KPI')}' ({row_p})."
-                        )
-
-    # Configure editable/disabled columns
-    editable_columns = []
-    disabled_columns = []
-
-    for col in filtered_df.columns:
-        if col in MONTH_COLUMNS:
-            editable_columns.append(col)
-        elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
-            editable_columns.append(col)
-        else:
-            disabled_columns.append(col)
-
+    # Configure column input types (Numbers for months, Text for comments/evidence)
     column_config = {}
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
@@ -338,6 +329,7 @@ if uploaded_file:
                 col, help="Editable text field"
             )
 
+    # Render data editor
     edited_df = st.data_editor(
         filtered_df,
         column_config=column_config,
@@ -345,7 +337,7 @@ if uploaded_file:
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
-        key=editor_key,
+        key=f"editor_{selected_sheet}_{selected_periodicity}",
     )
 
     cleaned_df = clean_invalid_entries(edited_df)
@@ -354,36 +346,44 @@ if uploaded_file:
     # SAVE CHANGES BACK TO SESSION STATE
     # ========================================================
 
-    if st.button(f"💾 Save Changes - {selected_sheet}"):
-        original = sheets[selected_sheet].copy()
-        code_col = find_column(original, KPI_CODE_ALIASES)
+    if selected_periodicity != "All":
+        if st.button(f"💾 Save Changes - {selected_sheet}"):
+            original = sheets[selected_sheet].copy()
+            code_col = find_column(original, KPI_CODE_ALIASES)
 
-        if code_col:
-            for idx, row in cleaned_df.iterrows():
-                kpi_code = str(row[code_col])
-                mask = original[code_col].astype(str) == kpi_code
+            if code_col:
+                for idx, row in cleaned_df.iterrows():
+                    kpi_code = str(row[code_col])
+                    mask = original[code_col].astype(str) == kpi_code
 
-                if mask.any():
-                    row_periodicity = get_value(row, FREQUENCY_ALIASES, "M")
-                    valid_m_for_row = allowed_months(row_periodicity)
+                    if mask.any():
+                        row_periodicity = get_value(
+                            row, FREQUENCY_ALIASES, "M"
+                        )
+                        valid_m_for_row = allowed_months(row_periodicity)
 
-                    for col in editable_columns:
-                        if col in cleaned_df.columns:
-                            val = row[col]
-                            if col in MONTH_COLUMNS and col not in valid_m_for_row:
-                                val = np.nan
+                        for col in editable_columns:
+                            if col in cleaned_df.columns:
+                                val = row[col]
+                                if (
+                                    col in MONTH_COLUMNS
+                                    and col not in valid_m_for_row
+                                ):
+                                    val = np.nan
 
-                            original.loc[mask, col] = (
-                                np.nan if pd.isna(val) else val
-                            )
-        else:
-            original = cleaned_df.copy()
+                                original.loc[mask, col] = (
+                                    np.nan if pd.isna(val) else val
+                                )
+            else:
+                original = cleaned_df.copy()
 
-        original = clean_invalid_entries(original)
-        st.session_state["kpi_sheets"][selected_sheet] = original
+            original = clean_invalid_entries(original)
+            st.session_state["kpi_sheets"][selected_sheet] = original
 
-        st.success(f"Changes saved successfully for sheet '{selected_sheet}'!")
-        st.rerun()
+            st.success(
+                f"Changes saved successfully for sheet '{selected_sheet}'!"
+            )
+            st.rerun()
 
 # ============================================================
 # EXPORT WORKBOOK
