@@ -128,7 +128,6 @@ def allowed_months(periodicity):
 def clean_invalid_entries(df):
     df = df.copy()
 
-    # Enforce float64 for month columns to ensure Streamlit NumberColumn compatibility
     for m in MONTH_COLUMNS:
         if m in df.columns:
             df[m] = pd.to_numeric(df[m], errors="coerce").astype("float64")
@@ -142,7 +141,6 @@ def clean_invalid_entries(df):
             if month not in df.columns:
                 continue
 
-            # Clear values entered into disallowed months for this row's periodicity
             if month not in valid_months:
                 df.loc[idx, month] = np.nan
 
@@ -174,7 +172,6 @@ def load_sheets(uploaded_file):
         df = pd.read_excel(uploaded_file, sheet_name=sheet, engine="openpyxl")
         df.columns = [clean_header(c) for c in df.columns]
 
-        # Explicitly setup dtypes
         for col in df.columns:
             col_str = str(col).strip()
             if col_str in MONTH_COLUMNS:
@@ -218,7 +215,6 @@ if uploaded_file:
 
     df = sheets[selected_sheet].copy()
     df.columns = [str(c).strip() for c in df.columns]
-
     df = clean_invalid_entries(df)
 
     # ========================================================
@@ -283,15 +279,11 @@ if uploaded_file:
 
     st.subheader("📝 KPI Data Entry")
 
-    # Get valid months based on selected periodicity
     valid_display_months = allowed_months(selected_periodicity)
 
-    # 1. Filter out non-applicable month columns dynamically from the display
     cols_to_display = []
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
-            # If "All" is selected, display all month columns
-            # Otherwise, ONLY show months valid for the chosen periodicity (e.g. 3, 6, 9, 12)
             if selected_periodicity == "All" or col in valid_display_months:
                 cols_to_display.append(col)
         else:
@@ -300,7 +292,30 @@ if uploaded_file:
     filtered_df = filtered_df[cols_to_display]
     filtered_df = clean_invalid_entries(filtered_df)
 
-    # 2. Determine editable and disabled columns
+    # --------------------------------------------------------
+    # WIDGET STATE INTERCEPTOR & CLEANER
+    # --------------------------------------------------------
+    editor_key = f"editor_{selected_sheet}_{selected_periodicity}"
+
+    if editor_key in st.session_state:
+        edited_data = st.session_state[editor_key].get("edited_rows", {})
+        purged_keys = []
+
+        for row_idx, changes in list(edited_data.items()):
+            if row_idx < len(filtered_df):
+                row = filtered_df.iloc[row_idx]
+                row_p = get_value(row, FREQUENCY_ALIASES, "M")
+                row_allowed = allowed_months(row_p)
+
+                for col_name, new_val in list(changes.items()):
+                    # If user typed into a month column not allowed for this specific row:
+                    if col_name in MONTH_COLUMNS and col_name not in row_allowed:
+                        del st.session_state[editor_key]["edited_rows"][row_idx][col_name]
+                        st.warning(
+                            f"⚠️ Entry rejected: Month {col_name} is not allowed for KPI '{get_value(row, KPI_CODE_ALIASES, 'KPI')}' ({row_p})."
+                        )
+
+    # Configure editable/disabled columns
     editable_columns = []
     disabled_columns = []
 
@@ -312,7 +327,6 @@ if uploaded_file:
         else:
             disabled_columns.append(col)
 
-    # 3. Configure strict input types (Numbers for months, Text for comments/evidence)
     column_config = {}
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
@@ -324,7 +338,6 @@ if uploaded_file:
                 col, help="Editable text field"
             )
 
-    # 4. Render Data Editor
     edited_df = st.data_editor(
         filtered_df,
         column_config=column_config,
@@ -332,10 +345,9 @@ if uploaded_file:
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
-        key=f"editor_{selected_sheet}_{selected_periodicity}",
+        key=editor_key,
     )
 
-    # Clean the edited inputs immediately
     cleaned_df = clean_invalid_entries(edited_df)
 
     # ========================================================
@@ -344,7 +356,6 @@ if uploaded_file:
 
     if st.button(f"💾 Save Changes - {selected_sheet}"):
         original = sheets[selected_sheet].copy()
-
         code_col = find_column(original, KPI_CODE_ALIASES)
 
         if code_col:
@@ -359,8 +370,6 @@ if uploaded_file:
                     for col in editable_columns:
                         if col in cleaned_df.columns:
                             val = row[col]
-
-                            # Strict check: purge value if typed into an unauthorized month cell
                             if col in MONTH_COLUMNS and col not in valid_m_for_row:
                                 val = np.nan
 
@@ -370,7 +379,6 @@ if uploaded_file:
         else:
             original = cleaned_df.copy()
 
-        # Final sanitization pass before updating session state
         original = clean_invalid_entries(original)
         st.session_state["kpi_sheets"][selected_sheet] = original
 
