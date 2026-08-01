@@ -102,7 +102,7 @@ def allowed_months(periodicity):
     elif val in ["3", "S", "SA", "SEMI ANNUAL", "SEMI-ANNUAL"]:
         return ["6", "12"]
     elif val in ["4", "A", "ANNUAL", "ANNUALLY", "Y", "YEARLY"]:
-        return ["12"]
+        return []
 
     try:
         p = int(float(val))
@@ -113,7 +113,7 @@ def allowed_months(periodicity):
         elif p == 3:
             return ["6", "12"]
         elif p == 4:
-            return ["12"]
+            return []
     except Exception:
         pass
 
@@ -148,15 +148,20 @@ def clean_invalid_entries(df):
 
 
 # ============================================================
-# EXCEL PROTECTION
+# EXCEL PROTECTION (ALL SHEETS + WORKBOOK STRUCTURE)
 # ============================================================
 
 
 def protect_workbook(workbook):
+    # 1. Protect every individual worksheet against cell editing
     for ws in workbook.worksheets:
         ws.protection.sheet = True
         ws.protection.password = EXPORT_PASSWORD
         ws.protection.enable()
+
+    # 2. Protect overall workbook structure (prevent sheet deletion/renaming)
+    workbook.security.workbookPassword = EXPORT_PASSWORD
+    workbook.security.lockStructure = True
 
 
 # ============================================================
@@ -280,20 +285,17 @@ if uploaded_file:
     st.subheader("📝 KPI Data Entry")
 
     if selected_periodicity == "All":
-        # VIEW-ONLY MODE WHEN 'ALL' IS SELECTED
         st.info(
             "🔒 **View-Only Mode**: Select a specific **Periodicity** above (e.g. Monthly, Quarterly, Semi-Annual, Annual) to enable data entry."
         )
 
         cols_to_display = list(filtered_df.columns)
-        disabled_columns = list(filtered_df.columns)  # Lock every column
+        disabled_columns = list(filtered_df.columns)
         editable_columns = []
 
     else:
-        # DATA ENTRY MODE FOR SPECIFIC PERIODICITY
         valid_display_months = allowed_months(selected_periodicity)
 
-        # Show ONLY authorized month columns for this specific frequency
         cols_to_display = []
         for col in filtered_df.columns:
             if col in MONTH_COLUMNS:
@@ -302,7 +304,6 @@ if uploaded_file:
             else:
                 cols_to_display.append(col)
 
-        # Enable editing only for month columns + evidence + comments
         editable_columns = [
             col
             for col in cols_to_display
@@ -317,7 +318,6 @@ if uploaded_file:
     filtered_df = filtered_df[cols_to_display]
     filtered_df = clean_invalid_entries(filtered_df)
 
-    # Configure column input types (Numbers for months, Text for comments/evidence)
     column_config = {}
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
@@ -329,7 +329,6 @@ if uploaded_file:
                 col, help="Editable text field"
             )
 
-    # Render data editor
     edited_df = st.data_editor(
         filtered_df,
         column_config=column_config,
@@ -386,7 +385,7 @@ if uploaded_file:
             st.rerun()
 
 # ============================================================
-# EXPORT WORKBOOK
+# EXPORT WORKBOOK WITH STRICT PROTECTION
 # ============================================================
 
 st.markdown("---")
@@ -403,6 +402,7 @@ def export_workbook(all_sheets):
                 writer, sheet_name=sheet_name, index=False
             )
 
+        # Apply sheet-level and workbook-level protection across all sheets
         protect_workbook(writer.book)
 
     output.seek(0)
@@ -413,11 +413,11 @@ if uploaded_file:
     export_file = export_workbook(st.session_state["kpi_sheets"])
     new_name = (
         uploaded_file.name.replace(".xlsx", "").replace(".xlsm", "")
-        + "_Updated.xlsx"
+        + "_Protected.xlsx"
     )
 
     st.download_button(
-        label="⬇️ Download Updated KPI Workbook",
+        label="⬇️ Download Protected KPI Workbook",
         data=export_file,
         file_name=new_name,
         mime=(
