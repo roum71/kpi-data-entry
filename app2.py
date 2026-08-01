@@ -219,7 +219,6 @@ if uploaded_file:
     df = sheets[selected_sheet].copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    # Clean existing data upon loading view
     df = clean_invalid_entries(df)
 
     # ========================================================
@@ -279,13 +278,14 @@ if uploaded_file:
         ]
 
     # ========================================================
-    # DYNAMIC COLUMN VISIBILITY & DATA EDITOR
+    # DYNAMIC COLUMN VISIBILITY & HARDENED DATA EDITOR
     # ========================================================
 
     st.subheader("📝 KPI Data Entry")
 
     valid_display_months = allowed_months(selected_periodicity)
 
+    # Filter visible columns dynamically based on periodicity filter
     cols_to_display = []
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
@@ -297,31 +297,35 @@ if uploaded_file:
     filtered_df = filtered_df[cols_to_display]
     filtered_df = clean_invalid_entries(filtered_df)
 
-    # Define editable columns
+    # Determine editable & disabled columns strictly
     editable_columns = []
+    disabled_columns = []
+
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
-            editable_columns.append(col)
+            # If a specific periodicity is selected, disable non-valid months strictly
+            if selected_periodicity != "All" and col not in valid_display_months:
+                disabled_columns.append(col)
+            else:
+                editable_columns.append(col)
         elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
             editable_columns.append(col)
+        else:
+            disabled_columns.append(col)
 
-    disabled_columns = [
-        col for col in filtered_df.columns if col not in editable_columns
-    ]
-
-    # Explicit column configurations matching underlying DataFrame dtypes
+    # Configure explicit column types to prevent invalid data types (e.g., text in month cells)
     column_config = {}
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
             column_config[col] = st.column_config.NumberColumn(
-                col, format="%g"
+                col, format="%g", help="Numeric KPI value only"
             )
         elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
             column_config[col] = st.column_config.TextColumn(
                 col, help="Editable text field"
             )
 
-    # Render data editor with clean static key per sheet
+    # Render data editor
     edited_df = st.data_editor(
         filtered_df,
         column_config=column_config,
@@ -329,10 +333,10 @@ if uploaded_file:
         use_container_width=True,
         hide_index=True,
         num_rows="fixed",
-        key=f"editor_{selected_sheet}",
+        key=f"editor_{selected_sheet}_{selected_periodicity}",
     )
 
-    # Clean the edited inputs immediately
+    # Instantly purge invalid inputs (e.g., if "All" periodicities are visible on-screen)
     cleaned_df = clean_invalid_entries(edited_df)
 
     # ========================================================
@@ -341,7 +345,6 @@ if uploaded_file:
 
     if st.button(f"💾 Save Changes - {selected_sheet}"):
         original = sheets[selected_sheet].copy()
-
         code_col = find_column(original, KPI_CODE_ALIASES)
 
         if code_col:
@@ -350,16 +353,24 @@ if uploaded_file:
                 mask = original[code_col].astype(str) == kpi_code
 
                 if mask.any():
+                    row_periodicity = get_value(row, FREQUENCY_ALIASES, "M")
+                    valid_m_for_row = allowed_months(row_periodicity)
+
                     for col in editable_columns:
                         if col in cleaned_df.columns:
                             val = row[col]
+
+                            # Strict check: clear value if saved into unauthorized month cell
+                            if col in MONTH_COLUMNS and col not in valid_m_for_row:
+                                val = np.nan
+
                             original.loc[mask, col] = (
                                 np.nan if pd.isna(val) else val
                             )
         else:
             original = cleaned_df.copy()
 
-        # Final sanitization pass before updating session state
+        # Final sanitization pass
         original = clean_invalid_entries(original)
         st.session_state["kpi_sheets"][selected_sheet] = original
 
