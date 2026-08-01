@@ -148,15 +148,20 @@ def clean_invalid_entries(df):
 
 
 # ============================================================
-# EXCEL PROTECTION
+# EXCEL PROTECTION (UPDATED FOR FULL SHEET LOCKING)
 # ============================================================
 
 
 def protect_workbook(workbook):
+    # Lock every individual sheet against editing
     for ws in workbook.worksheets:
         ws.protection.sheet = True
         ws.protection.password = EXPORT_PASSWORD
         ws.protection.enable()
+
+    # Lock overall workbook structure
+    workbook.security.workbookPassword = EXPORT_PASSWORD
+    workbook.security.lockStructure = True
 
 
 # ============================================================
@@ -417,7 +422,7 @@ if uploaded_file:
     )
 
     st.download_button(
-        label="⬇️ Download Updated KPI Workbook",
+        label="⬇️ Download Protected KPI Workbook",
         data=export_file,
         file_name=new_name,
         mime=(
