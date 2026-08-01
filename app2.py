@@ -102,7 +102,9 @@ def allowed_months(periodicity):
     elif val in ["3", "S", "SA", "SEMI ANNUAL", "SEMI-ANNUAL"]:
         return ["6", "12"]
     elif val in ["4", "A", "ANNUAL", "ANNUALLY", "Y", "YEARLY"]:
-        return ["12"]
+        # Annual targets have no specific monthly period breakdown.
+        # Lock all month columns so only Status, Evidence, and Comments are editable.
+        return []
 
     try:
         p = int(float(val))
@@ -113,7 +115,7 @@ def allowed_months(periodicity):
         elif p == 3:
             return ["6", "12"]
         elif p == 4:
-            return ["12"]
+            return []
     except Exception:
         pass
 
@@ -141,6 +143,7 @@ def clean_invalid_entries(df):
             if month not in df.columns:
                 continue
 
+            # Clear values entered into disallowed months for this row's periodicity
             if month not in valid_months:
                 df.loc[idx, month] = np.nan
 
@@ -274,7 +277,7 @@ if uploaded_file:
         ]
 
     # ========================================================
-    # DYNAMIC COLUMN VISIBILITY & HARDENED DATA EDITOR
+    # DYNAMIC COLUMN VISIBILITY & DATA EDITOR
     # ========================================================
 
     st.subheader("📝 KPI Data Entry")
@@ -282,7 +285,7 @@ if uploaded_file:
     if selected_periodicity == "All":
         # VIEW-ONLY MODE WHEN 'ALL' IS SELECTED
         st.info(
-            "🔒 **View-Only Mode**: Select a specific **Periodicity** above (e.g. Monthly, Quarterly, Semi-Annual, Annual) to enable data entry."
+            "🔒 **View-Only Mode**: Select a specific **Periodicity** above (e.g., Monthly, Quarterly, Semi-Annual, Annual) to enable data entry."
         )
 
         cols_to_display = list(filtered_df.columns)
@@ -293,7 +296,7 @@ if uploaded_file:
         # DATA ENTRY MODE FOR SPECIFIC PERIODICITY
         valid_display_months = allowed_months(selected_periodicity)
 
-        # Show ONLY authorized month columns for this specific frequency
+        # Show ONLY authorized month columns for this specific frequency (Annual will display no month columns)
         cols_to_display = []
         for col in filtered_df.columns:
             if col in MONTH_COLUMNS:
@@ -302,7 +305,7 @@ if uploaded_file:
             else:
                 cols_to_display.append(col)
 
-        # Enable editing only for month columns + evidence + comments
+        # Enable editing only for allowed month columns + evidence + comments
         editable_columns = [
             col
             for col in cols_to_display
@@ -317,7 +320,7 @@ if uploaded_file:
     filtered_df = filtered_df[cols_to_display]
     filtered_df = clean_invalid_entries(filtered_df)
 
-    # Configure column input types (Numbers for months, Text for comments/evidence)
+    # Configure column input types
     column_config = {}
     for col in filtered_df.columns:
         if col in MONTH_COLUMNS:
