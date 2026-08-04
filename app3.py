@@ -35,33 +35,50 @@ oauth2 = OAuth2Component(
     revoke_token_endpoint=REVOKE_ENDPOINT,
 )
 
+
+# Initialize session state for token
 if "token" not in st.session_state:
     st.session_state["token"] = None
 
-# Clear residual OAuth query parameters if no token exists to prevent token reuse errors
-if not st.session_state["token"] and "code" in st.query_params:
-    st.query_params.clear()
-    st.rerun()
+# 1. READ URL PARAMETERS FIRST
+query_params = st.query_params
+
+# 2. CLEAR USED CODES IF WE ALREADY HAVE A TOKEN OR NEED A FRESH LOGIN
+if not st.session_state["token"]:
+    if "state" in query_params and "code" not in query_params:
+        # Invalid state left in URL
+        st.query_params.clear()
+        st.rerun()
 
 if not st.session_state["token"]:
     st.title("🔒 KPI Data Entry System")
     st.caption("Multi-sheet KPI data entry with secure access control.")
     st.info("Please sign in using your Google account to access your KPIs.")
 
-    result = oauth2.authorize_button(
-        name="Log in with Google",
-        icon="https://www.google.com/favicon.ico",
-        redirect_uri=REDIRECT_URI,
-        scope="openid email profile",
-        key="google",
-        use_container_width=True,
-    )
+    try:
+        result = oauth2.authorize_button(
+            name="Log in with Google",
+            icon="https://www.google.com/favicon.ico",
+            redirect_uri=REDIRECT_URI,
+            scope="openid email profile",
+            key="google",
+            use_container_width=True,
+        )
 
-    if result and "token" in result:
-        st.session_state["token"] = result["token"]
+        if result and "token" in result:
+            st.session_state["token"] = result["token"]
+            # Immediately clear authorization parameters from browser bar
+            st.query_params.clear()
+            st.rerun()
+
+    except Exception as e:
+        # Catch stale/expired token exchange requests cleanly
+        st.warning("Login session expired or code already used. Restarting sign-in...")
+        st.query_params.clear()
+        st.session_state["token"] = None
         st.rerun()
-    st.stop()
 
+    st.stop()
 
 def parse_jwt(token_str):
     """Safely decodes user email from the OAuth ID token."""
