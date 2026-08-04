@@ -17,7 +17,7 @@ st.set_page_config(
 )
 
 # ============================================================
-# GOOGLE OAUTH CONFIGURATION (VIA STREAMLIT-OAUTH)
+# GOOGLE OAUTH CONFIGURATION
 # ============================================================
 
 CLIENT_ID = st.secrets["oauth2"]["client_id"]
@@ -35,21 +35,10 @@ oauth2 = OAuth2Component(
     revoke_token_endpoint=REVOKE_ENDPOINT,
 )
 
-
-# Initialize session state for token
 if "token" not in st.session_state:
     st.session_state["token"] = None
 
-# 1. READ URL PARAMETERS FIRST
-query_params = st.query_params
-
-# 2. CLEAR USED CODES IF WE ALREADY HAVE A TOKEN OR NEED A FRESH LOGIN
-if not st.session_state["token"]:
-    if "state" in query_params and "code" not in query_params:
-        # Invalid state left in URL
-        st.query_params.clear()
-        st.rerun()
-
+# AUTHENTICATION GUARD (FAST LOAD)
 if not st.session_state["token"]:
     st.title("🔒 KPI Data Entry System")
     st.caption("Multi-sheet KPI data entry with secure access control.")
@@ -67,21 +56,18 @@ if not st.session_state["token"]:
 
         if result and "token" in result:
             st.session_state["token"] = result["token"]
-            # Immediately clear authorization parameters from browser bar
             st.query_params.clear()
             st.rerun()
 
-    except Exception as e:
-        # Catch stale/expired token exchange requests cleanly
-        st.warning("Login session expired or code already used. Restarting sign-in...")
+    except Exception:
+        st.warning("Session expired or code already used. Please sign in again.")
         st.query_params.clear()
         st.session_state["token"] = None
-        st.rerun()
 
-    st.stop()
+    st.stop()  # STOPS EXECUTION HERE BEFORE CONNECTING TO GOOGLE SHEETS
 
+# DECODE VERIFIED USER EMAIL
 def parse_jwt(token_str):
-    """Safely decodes user email from the OAuth ID token."""
     try:
         parts = token_str.split(".")
         if len(parts) > 1:
@@ -92,15 +78,15 @@ def parse_jwt(token_str):
         pass
     return {}
 
-
 id_token = st.session_state["token"].get("id_token", "")
 claims = parse_jwt(id_token)
 CURRENT_USER_EMAIL = claims.get("email", "").strip().lower()
 
 if not CURRENT_USER_EMAIL:
-    st.error("Failed to retrieve verified email. Please log out and try again.")
+    st.error("Failed to retrieve verified email. Please clear session and retry.")
     if st.button("Clear Session"):
         st.session_state["token"] = None
+        st.query_params.clear()
         st.rerun()
     st.stop()
 
