@@ -1,0 +1,416 @@
+import io
+import re
+import gspread
+import numpy as np
+import pandas as pd
+import streamlit as st
+from google.oauth2.service_account import Credentials
+
+# ============================================================
+# STREAMLIT CONFIGURATION
+# ============================================================
+
+st.set_page_config(
+    page_title="KPI Data Entry System", page_icon="📊", layout="wide"
+)
+
+st.title("📊 KPI Data Entry System (Google Sheets)")
+st.caption(
+    "Multi-sheet KPI data entry with strict periodicity validation and direct Google Sheets sync."
+)
+
+# ============================================================
+# CONSTANTS & CONFIGURATION
+# ============================================================
+
+MONTH_COLUMNS = [str(i) for i in range(1, 13)]
+
+# Paste your Google Sheet ID or URL here
+DEFAULT_SPREADSHEET_ID = "1Bsb7EiQ4-az1W12Xrmd6HVg9I4naB-JpBJQBkkdWYTs"
+
+# Required OAuth Scopes for Google Sheets API
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+# ============================================================
+# COLUMN ALIASES
+# ============================================================
+
+YEAR_ALIASES = ["Year", "year", "السنة"]
+LOCATION_ALIASES = [
+    "Location",
+    "location",
+    "Location Code",
+    "location_code",
+    "الموقع",
+]
+FREQUENCY_ALIASES = [
+    "Periodicity",
+    "periodicity",
+    "Freq",
+    "frequency",
+    "Frequency",
+    "التكرار",
+]
+KPI_CODE_ALIASES = ["KPI Code", "kpi_code", "Code", "code"]
+KPI_NAME_ALIASES = ["KPI Name", "KPI Name (AR)", "kpi_name", "name"]
+EVIDENCE_ALIASES = [
+    "Evidence Status",
+    "evidence_status",
+    "Evidence",
+    "evodence",
+    "حالة الدليل",
+    "Status",
+    "status",
+]
+COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
+
+# ============================================================
+# GOOGLE SHEETS CONNECTION & AUTHENTICATION
+# ============================================================
+
+
+@st.cache_resource
+def get_gspread_client():
+    """Authenticates using Streamlit Secrets for Google Service Account."""
+    credentials = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"], scopes=SCOPES
+    )
+    client = gspread.authorize(credentials)
+    return client
+
+
+def load_google_sheet_data(spreadsheet_id):
+    """Loads all worksheets from the target Google Sheet into a dictionary of DataFrames."""
+    client = get_gspread_client()
+    sh = client.open_by_key(spreadsheet_id)
+    sheets = {}
+
+    for ws in sh.worksheets():
+        data = ws.get_all_values()
+        if not data:
+            continue
+        # Convert first row to header
+        headers = [clean_header(c) for c in data[0]]
+        df = pd.DataFrame(data[1:], columns=headers)
+
+        for col in df.columns:
+            col_str = str(col).strip()
+            if col_str in MONTH_COLUMNS:
+                df[col] = pd.to_numeric(df[col], errors="coerce").astype(
+                    "float64"
+                )
+            elif col_str in EVIDENCE_ALIASES or col_str in COMMENT_ALIASES:
+                df[col] = df[col].fillna("").astype(str)
+
+        df = clean_invalid_entries(df)
+        sheets[ws.title] = df
+
+    return sheets
+
+
+def save_sheet_to_google(spreadsheet_id, sheet_name, df):
+    """Writes the updated DataFrame back to the EXACT same Google Sheet tab."""
+    client = get_gspread_client()
+    sh = client.open_by_key(spreadsheet_id)
+    ws = sh.worksheet(sheet_name)
+
+    # Convert NaN back to empty strings for Google Sheets presentation
+    clean_df = df.copy()
+    clean_df = clean_df.fillna("")
+
+    # Prepare values array including header
+    header = clean_df.columns.values.tolist()
+    data = clean_df.values.tolist()
+    full_data = [header] + data
+
+    # Clear worksheet and write new data
+    ws.clear()
+    ws.update("A1", full_data)
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+
+def clean_header(col):
+    if col is None:
+        return ""
+    col = str(col)
+    col = col.replace("\xa0", " ")
+    col = re.sub(r"[\n\r\t]", " ", col)
+    return col.strip()
+
+
+def find_column(df, aliases):
+    for c in df.columns:
+        if c in aliases:
+            return c
+    return None
+
+
+def get_value(row, aliases, default=None):
+    for c in aliases:
+        if c in row.index:
+            if pd.notna(row[c]):
+                return row[c]
+    return default
+
+
+# ============================================================
+# PERIODICITY RULES
+# ============================================================
+
+
+def allowed_months(periodicity):
+    val = str(periodicity).strip().upper()
+
+    if val in ["1", "M", "MONTHLY"]:
+        return MONTH_COLUMNS
+    elif val in ["2", "Q", "QUARTERLY"]:
+        return ["3", "6", "9", "12"]
+    elif val in ["3", "S", "SA", "SEMI ANNUAL", "SEMI-ANNUAL"]:
+        return ["6", "12"]
+    elif val in ["4", "A", "ANNUAL", "ANNUALLY", "Y", "YEARLY"]:
+        return ["12"]
+
+    try:
+        p = int(float(val))
+        if p == 1:
+            return MONTH_COLUMNS
+        elif p == 2:
+            return ["3", "6", "9", "12"]
+        elif p == 3:
+            return ["6", "12"]
+        elif p == 4:
+            return ["12"]
+    except Exception:
+        pass
+
+    return MONTH_COLUMNS
+
+
+# ============================================================
+# SILENT AUTO-CLEAR VALIDATION ENGINE
+# ============================================================
+
+
+def clean_invalid_entries(df):
+    df = df.copy()
+
+    for m in MONTH_COLUMNS:
+        if m in df.columns:
+            df[m] = pd.to_numeric(df[m], errors="coerce").astype("float64")
+
+    for idx in df.index:
+        row = df.loc[idx]
+        periodicity = get_value(row, FREQUENCY_ALIASES, "M")
+        valid_months = allowed_months(periodicity)
+
+        for month in MONTH_COLUMNS:
+            if month not in df.columns:
+                continue
+
+            if month not in valid_months:
+                df.loc[idx, month] = np.nan
+
+    return df
+
+
+# ============================================================
+# MAIN APPLICATION
+# ============================================================
+
+st.sidebar.header("🔑 Google Sheet Connection")
+spreadsheet_id = st.sidebar.text_input("Spreadsheet ID", DEFAULT_SPREADSHEET_ID)
+
+if st.sidebar.button("🔄 Reload Data from Google Sheet") or "kpi_sheets" not in st.session_state:
+    if spreadsheet_id and spreadsheet_id != "YOUR_GOOGLE_SHEET_ID_HERE":
+        with st.spinner("Connecting to Google Sheet..."):
+            st.session_state["kpi_sheets"] = load_google_sheet_data(spreadsheet_id)
+            st.success("Loaded sheet successfully!")
+    else:
+        st.warning("Please provide a valid Google Sheet ID in the sidebar.")
+
+if "kpi_sheets" in st.session_state:
+    sheets = st.session_state["kpi_sheets"]
+
+    # ========================================================
+    # SELECT ENTRY SHEET
+    # ========================================================
+
+    available_sheets = list(sheets.keys())
+    selected_sheet = st.selectbox("Select Entry Sheet", available_sheets)
+
+    df = sheets[selected_sheet].copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    df = clean_invalid_entries(df)
+
+    # ========================================================
+    # FILTERS
+    # ========================================================
+
+    st.subheader("🔎 Filters")
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        year_col = find_column(df, YEAR_ALIASES)
+        if year_col:
+            years = sorted(df[year_col].dropna().astype(str).unique())
+            selected_year = st.selectbox("Year", ["All"] + years)
+        else:
+            selected_year = "All"
+
+    with c2:
+        location_col = find_column(df, LOCATION_ALIASES)
+        if location_col:
+            locations = sorted(df[location_col].dropna().astype(str).unique())
+            selected_location = st.selectbox("Location", ["All"] + locations)
+        else:
+            selected_location = "All"
+
+    with c3:
+        periodicity_col = find_column(df, FREQUENCY_ALIASES)
+        if periodicity_col:
+            frequencies = sorted(
+                df[periodicity_col].dropna().astype(str).unique()
+            )
+            selected_periodicity = st.selectbox(
+                "Periodicity", ["All"] + frequencies
+            )
+        else:
+            selected_periodicity = "All"
+
+    # ========================================================
+    # APPLY FILTERS
+    # ========================================================
+
+    filtered_df = df.copy()
+
+    if selected_year != "All" and year_col:
+        filtered_df = filtered_df[
+            filtered_df[year_col].astype(str) == selected_year
+        ]
+
+    if selected_location != "All" and location_col:
+        filtered_df = filtered_df[
+            filtered_df[location_col].astype(str) == selected_location
+        ]
+
+    if selected_periodicity != "All" and periodicity_col:
+        filtered_df = filtered_df[
+            filtered_df[periodicity_col].astype(str) == selected_periodicity
+        ]
+
+    # ========================================================
+    # DYNAMIC COLUMN VISIBILITY & HARDENED DATA EDITOR
+    # ========================================================
+
+    st.subheader("📝 KPI Data Entry")
+
+    if selected_periodicity == "All":
+        st.info(
+            "🔒 **View-Only Mode**: Select a specific **Periodicity** above (e.g. Monthly, Quarterly, Semi-Annual, Annual) to enable data entry."
+        )
+
+        cols_to_display = list(filtered_df.columns)
+        disabled_columns = list(filtered_df.columns)
+        editable_columns = []
+
+    else:
+        valid_display_months = allowed_months(selected_periodicity)
+
+        cols_to_display = []
+        for col in filtered_df.columns:
+            if col in MONTH_COLUMNS:
+                if col in valid_display_months:
+                    cols_to_display.append(col)
+            else:
+                cols_to_display.append(col)
+
+        editable_columns = [
+            col
+            for col in cols_to_display
+            if col in MONTH_COLUMNS
+            or col in EVIDENCE_ALIASES
+            or col in COMMENT_ALIASES
+        ]
+        disabled_columns = [
+            col for col in cols_to_display if col not in editable_columns
+        ]
+
+    filtered_df = filtered_df[cols_to_display]
+    filtered_df = clean_invalid_entries(filtered_df)
+
+    column_config = {}
+    for col in filtered_df.columns:
+        if col in MONTH_COLUMNS:
+            column_config[col] = st.column_config.NumberColumn(
+                col, format="%g", help="Numeric KPI value only"
+            )
+        elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
+            column_config[col] = st.column_config.TextColumn(
+                col, help="Editable text field"
+            )
+
+    edited_df = st.data_editor(
+        filtered_df,
+        column_config=column_config,
+        disabled=disabled_columns,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="fixed",
+        key=f"editor_{selected_sheet}_{selected_periodicity}",
+    )
+
+    cleaned_df = clean_invalid_entries(edited_df)
+
+    # ========================================================
+    # SAVE CHANGES DIRECTLY BACK TO GOOGLE SHEETS
+    # ========================================================
+
+    if selected_periodicity != "All":
+        if st.button(f"💾 Sync Changes to Google Sheet - {selected_sheet}"):
+            original = sheets[selected_sheet].copy()
+            code_col = find_column(original, KPI_CODE_ALIASES)
+
+            if code_col:
+                for idx, row in cleaned_df.iterrows():
+                    kpi_code = str(row[code_col])
+                    mask = original[code_col].astype(str) == kpi_code
+
+                    if mask.any():
+                        row_periodicity = get_value(
+                            row, FREQUENCY_ALIASES, "M"
+                        )
+                        valid_m_for_row = allowed_months(row_periodicity)
+
+                        for col in editable_columns:
+                            if col in cleaned_df.columns:
+                                val = row[col]
+                                if (
+                                    col in MONTH_COLUMNS
+                                    and col not in valid_m_for_row
+                                ):
+                                    val = np.nan
+
+                                original.loc[mask, col] = (
+                                    np.nan if pd.isna(val) else val
+                                )
+            else:
+                original = cleaned_df.copy()
+
+            original = clean_invalid_entries(original)
+            st.session_state["kpi_sheets"][selected_sheet] = original
+
+            # Write updated sheet to Google Sheet source
+            with st.spinner("Writing directly to Google Sheet..."):
+                save_sheet_to_google(spreadsheet_id, selected_sheet, original)
+
+            st.success(
+                f"Changes saved live to Google Sheet for tab '{selected_sheet}'!"
+            )
+            st.rerun()
