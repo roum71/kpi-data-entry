@@ -15,14 +15,14 @@ st.set_page_config(
 )
 
 # ============================================================
-# GOOGLE OAUTH AUTHENTICATION (OPTION 1)
+# GOOGLE OAUTH AUTHENTICATION
 # ============================================================
-# Handle both stable (st.user) and experimental (st.experimental_user) APIs safely
-user_info = getattr(st, "user", None) or getattr(
-    st, "experimental_user", None
-)
 
-if not user_info or not user_info.is_logged_in:
+# Safely handle both st.user and st.experimental_user APIs
+user_obj = getattr(st, "user", None) or getattr(st, "experimental_user", None)
+is_logged_in = getattr(user_obj, "is_logged_in", False) if user_obj else False
+
+if not is_logged_in:
     st.title("🔒 KPI Data Entry System")
     st.caption("Multi-sheet KPI data entry with secure access control.")
     st.info("Please sign in using your Google account to access your KPIs.")
@@ -31,15 +31,13 @@ if not user_info or not user_info.is_logged_in:
     st.stop()
 
 # Retrieve verified Google Email from the session
-CURRENT_USER_EMAIL = user_info.email
+CURRENT_USER_EMAIL = getattr(user_obj, "email", "")
 
 # Sidebar User Info & Logout
 st.sidebar.markdown(f"👤 **Logged in as:**\n`{CURRENT_USER_EMAIL}`")
 if st.sidebar.button("🚪 Log Out"):
     st.logout()
     st.rerun()
-
-
 
 st.title("📊 KPI Data Entry System")
 st.caption(
@@ -162,9 +160,7 @@ def load_google_sheet_data(spreadsheet_id):
         for col in df.columns:
             col_str = str(col).strip()
             if col_str in MONTH_COLUMNS:
-                df[col] = pd.to_numeric(df[col], errors="coerce").astype(
-                    "float64"
-                )
+                df[col] = pd.to_numeric(df[col], errors="coerce")
             elif col_str in EVIDENCE_ALIASES or col_str in COMMENT_ALIASES:
                 df[col] = df[col].fillna("").astype(str)
 
@@ -231,7 +227,7 @@ def clean_invalid_entries(df):
 
     for m in MONTH_COLUMNS:
         if m in df.columns:
-            df[m] = pd.to_numeric(df[m], errors="coerce").astype("float64")
+            df[m] = pd.to_numeric(df[m], errors="coerce")
 
     for idx in df.index:
         row = df.loc[idx]
