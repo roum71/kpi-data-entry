@@ -47,26 +47,20 @@ COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
 # ============================================================
 
 from google.oauth2 import service_account
-from cryptography.hazmat.primitives import serialization
 
 @st.cache_resource
 def get_gspread_client():
     # Grab secrets dictionary
     info = dict(st.secrets["gcp_service_account"])
     
-    # Clean and format the private key string into raw bytes with proper newlines
+    # Clean and format the private key string to handle literal \n sequences or missing wrappers
     pk_str = info["private_key"]
-    # Handle both literal \n and actual newlines
     pk_str = pk_str.replace("\\n", "\n")
     
     if not pk_str.strip().startswith("-----BEGIN PRIVATE KEY-----"):
-        # If it was stripped entirely, rebuild it
         pk_str = f"-----BEGIN PRIVATE KEY-----\n{pk_str}\n-----END PRIVATE KEY-----"
 
-    # Convert to bytes as expected by cryptography backend
-    private_key_bytes = pk_str.strip().encode("utf-8")
-
-    # Manually build credentials to completely bypass string parsing bugs in google.auth
+    # Reconstruct clean config payload for service account initialization
     credentials = service_account.Credentials.from_service_account_info(
         {
             "type": info["type"],
@@ -80,7 +74,9 @@ def get_gspread_client():
         scopes=SCOPES
     )
     
-    return gspread.authorize(credentials)def clean_header(col):
+    return gspread.authorize(credentials)
+
+def clean_header(col):
     if col is None:
         return ""
     col = str(col).replace("\xa0", " ")
