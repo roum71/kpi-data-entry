@@ -50,23 +50,24 @@ from google.oauth2 import service_account
 
 @st.cache_resource
 def get_gspread_client():
-    # Grab secrets dictionary
     info = dict(st.secrets["gcp_service_account"])
     
-    # Clean and format the private key string to handle literal \n sequences or missing wrappers
+    # Ensure the private key uses actual raw newlines cleanly parsed by cryptography
     pk_str = info["private_key"]
-    pk_str = pk_str.replace("\\n", "\n")
+    if "\\n" in pk_str:
+        pk_str = pk_str.replace("\\n", "\n")
     
-    if not pk_str.strip().startswith("-----BEGIN PRIVATE KEY-----"):
+    pk_str = pk_str.strip()
+    if not pk_str.startswith("-----BEGIN PRIVATE KEY-----"):
         pk_str = f"-----BEGIN PRIVATE KEY-----\n{pk_str}\n-----END PRIVATE KEY-----"
 
-    # Reconstruct clean config payload for service account initialization
+    # Pass the key cleanly formatted as standard text block
     credentials = service_account.Credentials.from_service_account_info(
         {
             "type": info["type"],
             "project_id": info["project_id"],
             "private_key_id": info["private_key_id"],
-            "private_key": pk_str.strip(),
+            "private_key": pk_str,
             "client_email": info["client_email"],
             "client_id": info["client_id"],
             "token_uri": info["token_uri"],
