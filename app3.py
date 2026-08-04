@@ -46,37 +46,38 @@ COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
 # HELPER FUNCTIONS & CACHED GOOGLE CONNECTION
 # ============================================================
 
-from google.oauth2 import service_account
-
 @st.cache_resource
 def get_gspread_client():
     info = dict(st.secrets["gcp_service_account"])
     
-    # Ensure the private key uses actual raw newlines cleanly parsed by cryptography
-    pk_str = info["private_key"]
-    if "\\n" in pk_str:
-        pk_str = pk_str.replace("\\n", "\n")
+    # Extract and normalize the private key string to handle all TOML escaping variations
+    pk = str(info["private_key"])
     
-    pk_str = pk_str.strip()
-    if not pk_str.startswith("-----BEGIN PRIVATE KEY-----"):
-        pk_str = f"-----BEGIN PRIVATE KEY-----\n{pk_str}\n-----END PRIVATE KEY-----"
+    # Replace literal escape sequences with real newlines
+    pk = pk.replace("\\n", "\n")
+    
+    # Ensure proper PEM header/footer spacing
+    if "BEGIN PRIVATE KEY" in pk and not pk.startswith("-----BEGIN PRIVATE KEY-----"):
+        parts = pk.split("-----BEGIN PRIVATE KEY-----")
+        pk = "-----BEGIN PRIVATE KEY-----" + parts[-1]
+    if "END PRIVATE KEY" in pk and not pk.endswith("-----END PRIVATE KEY-----"):
+        parts = pk.split("-----END PRIVATE KEY-----")
+        pk = parts[0] + "-----END PRIVATE KEY-----"
 
-    # Pass the key cleanly formatted as standard text block
     credentials = service_account.Credentials.from_service_account_info(
         {
-            "type": info["type"],
-            "project_id": info["project_id"],
-            "private_key_id": info["private_key_id"],
-            "private_key": pk_str,
-            "client_email": info["client_email"],
-            "client_id": info["client_id"],
-            "token_uri": info["token_uri"],
+            "type": info.get("type", "service_account"),
+            "project_id": info.get("project_id"),
+            "private_key_id": info.get("private_key_id"),
+            "private_key": pk.strip(),
+            "client_email": info.get("client_email"),
+            "client_id": info.get("client_id"),
+            "token_uri": info.get("token_uri", "https://oauth2.googleapis.com/token"),
         },
         scopes=SCOPES
     )
     
     return gspread.authorize(credentials)
-
 def clean_header(col):
     if col is None:
         return ""
