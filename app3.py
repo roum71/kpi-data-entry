@@ -19,18 +19,23 @@ st.set_page_config(
 # GOOGLE OAUTH CONFIGURATION (VIA STREAMLIT-OAUTH)
 # ============================================================
 
+# ============================================================
+# GOOGLE OAUTH CONFIGURATION (VIA STREAMLIT-OAUTH)
+# ============================================================
+
 CLIENT_ID = st.secrets["oauth2"]["client_id"]
 CLIENT_SECRET = st.secrets["oauth2"]["client_secret"]
 AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 
+# FIXED: Changed 'revoke_endpoint' to 'revoke_token_endpoint'
 oauth2 = OAuth2Component(
     client_id=CLIENT_ID,
     client_secret=CLIENT_SECRET,
     authorize_endpoint=AUTHORIZE_ENDPOINT,
     token_endpoint=TOKEN_ENDPOINT,
-    revoke_endpoint=REVOKE_ENDPOINT,
+    revoke_token_endpoint=REVOKE_ENDPOINT, 
 )
 
 if "token" not in st.session_state:
