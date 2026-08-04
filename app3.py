@@ -14,6 +14,27 @@ st.set_page_config(
     page_title="KPI Data Entry System", page_icon="📊", layout="wide"
 )
 
+# ============================================================
+# GOOGLE OAUTH AUTHENTICATION (OPTION 1)
+# ============================================================
+
+if not st.experimental_user.is_logged_in:
+    st.title("🔒 KPI Data Entry System")
+    st.caption("Multi-sheet KPI data entry with secure access control.")
+    st.info("Please sign in using your Google account to access your KPIs.")
+    if st.button("🔑 Log in with Google", use_container_width=True):
+        st.login("google")
+    st.stop()
+
+# Retrieve verified Google Email from the session
+CURRENT_USER_EMAIL = st.experimental_user.email
+
+# Sidebar User Info & Logout
+st.sidebar.markdown(f"👤 **Logged in as:**\n`{CURRENT_USER_EMAIL}`")
+if st.sidebar.button("🚪 Log Out"):
+    st.logout()
+    st.rerun()
+
 st.title("📊 KPI Data Entry System")
 st.caption(
     "Multi-sheet KPI data entry with strict periodicity validation and live Google Sheets sync."
@@ -25,7 +46,7 @@ st.caption(
 
 MONTH_COLUMNS = [str(i) for i in range(1, 13)]
 
-# Hardcoded Google Sheet ID (Your actual Sheet ID)
+# Hardcoded Google Sheet ID
 SPREADSHEET_ID = "1Bsb7EiQ4-az1W12Xrmd6HVg9I4naB-JpBJQBkkdWYTs"
 
 # Required OAuth Scopes for Google Sheets API
@@ -68,7 +89,7 @@ EVIDENCE_ALIASES = [
 COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
 
 # ============================================================
-# GOOGLE SHEETS CONNECTION & AUTHENTICATION
+# GOOGLE SHEETS CONNECTION & USER ACCESS CONTROL
 # ============================================================
 
 
@@ -78,20 +99,57 @@ def get_gspread_client():
     credentials = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"], scopes=SCOPES
     )
-    client = gspread.authorize(credentials)
-    return client
+    return gspread.authorize(credentials)
+
+
+def load_user_permissions(spreadsheet_id, user_email):
+    """Fetches allowed location codes for the logged-in email from 'User_Permissions' tab."""
+    client = get_gspread_client()
+    sh = client.open_by_key(spreadsheet_id)
+
+    try:
+        ws = sh.worksheet("User_Permissions")
+        perm_df = pd.DataFrame(ws.get_all_records())
+
+        # Normalize email strings
+        user_row = perm_df[
+            perm_df["email"].astype(str).str.strip().str.lower()
+            == user_email.strip().lower()
+        ]
+
+        if user_row.empty:
+            return [], "none"
+
+        locs_raw = str(user_row.iloc[0]["locations"])
+        role = str(user_row.iloc[0].get("role", "user")).strip().lower()
+
+        if locs_raw.strip().upper() == "ALL" or role == "admin":
+            return ["ALL"], "admin"
+
+        allowed_locs = [
+            l.strip() for l in locs_raw.split(",") if l.strip()
+        ]
+        return allowed_locs, role
+
+    except Exception as e:
+        st.error(f"Error checking User_Permissions tab: {e}")
+        return [], "none"
 
 
 def load_google_sheet_data(spreadsheet_id):
-    """Loads all worksheets from the Google Sheet into a dictionary of DataFrames."""
+    """Loads worksheets from Google Sheets (skips internal admin tabs)."""
     client = get_gspread_client()
     sh = client.open_by_key(spreadsheet_id)
     sheets = {}
 
     for ws in sh.worksheets():
+        if ws.title == "User_Permissions":
+            continue  # Do not load administrative permissions table into memory
+
         data = ws.get_all_values()
         if not data:
             continue
+
         headers = [clean_header(c) for c in data[0]]
         df = pd.DataFrame(data[1:], columns=headers)
 
@@ -111,17 +169,13 @@ def load_google_sheet_data(spreadsheet_id):
 
 
 def save_sheet_to_google(spreadsheet_id, sheet_name, df):
-    """Writes the updated DataFrame directly back to the Google Sheet tab."""
+    """Writes the updated DataFrame directly back to Google Sheet."""
     client = get_gspread_client()
     sh = client.open_by_key(spreadsheet_id)
     ws = sh.worksheet(sheet_name)
 
-    clean_df = df.copy()
-    clean_df = clean_df.fillna("")
-
-    header = clean_df.columns.values.tolist()
-    data = clean_df.values.tolist()
-    full_data = [header] + data
+    clean_df = df.copy().fillna("")
+    full_data = [clean_df.columns.values.tolist()] + clean_df.values.tolist()
 
     ws.clear()
     ws.update("A1", full_data)
@@ -135,10 +189,8 @@ def save_sheet_to_google(spreadsheet_id, sheet_name, df):
 def clean_header(col):
     if col is None:
         return ""
-    col = str(col)
-    col = col.replace("\xa0", " ")
-    col = re.sub(r"[\n\r\t]", " ", col)
-    return col.strip()
+    col = str(col).replace("\xa0", " ")
+    return re.sub(r"[\n\r\t]", " ", col).strip()
 
 
 def find_column(df, aliases):
@@ -150,20 +202,13 @@ def find_column(df, aliases):
 
 def get_value(row, aliases, default=None):
     for c in aliases:
-        if c in row.index:
-            if pd.notna(row[c]):
-                return row[c]
+        if c in row.index and pd.notna(row[c]):
+            return row[c]
     return default
-
-
-# ============================================================
-# PERIODICITY RULES
-# ============================================================
 
 
 def allowed_months(periodicity):
     val = str(periodicity).strip().upper()
-
     if val in ["1", "M", "MONTHLY"]:
         return MONTH_COLUMNS
     elif val in ["2", "Q", "QUARTERLY"]:
@@ -172,26 +217,7 @@ def allowed_months(periodicity):
         return ["6", "12"]
     elif val in ["4", "A", "ANNUAL", "ANNUALLY", "Y", "YEARLY"]:
         return ["12"]
-
-    try:
-        p = int(float(val))
-        if p == 1:
-            return MONTH_COLUMNS
-        elif p == 2:
-            return ["3", "6", "9", "12"]
-        elif p == 3:
-            return ["6", "12"]
-        elif p == 4:
-            return ["12"]
-    except Exception:
-        pass
-
     return MONTH_COLUMNS
-
-
-# ============================================================
-# SILENT AUTO-CLEAR VALIDATION ENGINE
-# ============================================================
 
 
 def clean_invalid_entries(df):
@@ -207,36 +233,63 @@ def clean_invalid_entries(df):
         valid_months = allowed_months(periodicity)
 
         for month in MONTH_COLUMNS:
-            if month not in df.columns:
-                continue
-
-            if month not in valid_months:
+            if month in df.columns and month not in valid_months:
                 df.loc[idx, month] = np.nan
 
     return df
 
 
 # ============================================================
+# ACCESS CONTROL CHECK
+# ============================================================
+
+allowed_locations, user_role = load_user_permissions(
+    SPREADSHEET_ID, CURRENT_USER_EMAIL
+)
+
+if not allowed_locations:
+    st.error(
+        f"⛔ Access Denied: User `{CURRENT_USER_EMAIL}` is not authorized to access any location."
+    )
+    st.info(
+        "Please ensure your email is registered in the `User_Permissions` worksheet tab."
+    )
+    st.stop()
+
+st.sidebar.markdown(f"🔑 **Role:** `{user_role.upper()}`")
+st.sidebar.markdown(f"📍 **Locations:** `{', '.join(allowed_locations)}`")
+
+# ============================================================
 # MAIN APPLICATION LOGIC
 # ============================================================
 
-# Auto-load data on application launch
 if "kpi_sheets" not in st.session_state:
     with st.spinner("Connecting to Google Sheets..."):
         st.session_state["kpi_sheets"] = load_google_sheet_data(SPREADSHEET_ID)
 
 sheets = st.session_state["kpi_sheets"]
-
-# ============================================================
-# SELECT ENTRY SHEET
-# ============================================================
-
 available_sheets = list(sheets.keys())
 selected_sheet = st.selectbox("Select Entry Sheet", available_sheets)
 
 df = sheets[selected_sheet].copy()
 df.columns = [str(c).strip() for c in df.columns]
-df = clean_invalid_entries(df)
+
+location_col = find_column(df, LOCATION_ALIASES)
+if not location_col:
+    st.error("Sheet does not contain a valid Location column!")
+    st.stop()
+
+# HARD SERVER-SIDE FILTER BY PERMISSIONS
+if "ALL" in allowed_locations:
+    authorized_df = df.copy()
+else:
+    authorized_df = df[
+        df[location_col].astype(str).str.strip().isin(allowed_locations)
+    ].copy()
+
+if authorized_df.empty:
+    st.warning("No KPI rows match your assigned location permissions.")
+    st.stop()
 
 # ============================================================
 # FILTERS
@@ -246,25 +299,25 @@ st.subheader("🔎 Filters")
 c1, c2, c3 = st.columns(3)
 
 with c1:
-    year_col = find_column(df, YEAR_ALIASES)
+    year_col = find_column(authorized_df, YEAR_ALIASES)
     if year_col:
-        years = sorted(df[year_col].dropna().astype(str).unique())
+        years = sorted(authorized_df[year_col].dropna().astype(str).unique())
         selected_year = st.selectbox("Year", ["All"] + years)
     else:
         selected_year = "All"
 
 with c2:
-    location_col = find_column(df, LOCATION_ALIASES)
-    if location_col:
-        locations = sorted(df[location_col].dropna().astype(str).unique())
-        selected_location = st.selectbox("Location", ["All"] + locations)
-    else:
-        selected_location = "All"
+    locations = sorted(
+        authorized_df[location_col].dropna().astype(str).unique()
+    )
+    selected_location = st.selectbox("Location", locations)
 
 with c3:
-    periodicity_col = find_column(df, FREQUENCY_ALIASES)
+    periodicity_col = find_column(authorized_df, FREQUENCY_ALIASES)
     if periodicity_col:
-        frequencies = sorted(df[periodicity_col].dropna().astype(str).unique())
+        frequencies = sorted(
+            authorized_df[periodicity_col].dropna().astype(str).unique()
+        )
         selected_periodicity = st.selectbox(
             "Periodicity", ["All"] + frequencies
         )
@@ -275,16 +328,13 @@ with c3:
 # APPLY FILTERS
 # ============================================================
 
-filtered_df = df.copy()
+filtered_df = authorized_df[
+    authorized_df[location_col].astype(str) == selected_location
+].copy()
 
 if selected_year != "All" and year_col:
     filtered_df = filtered_df[
         filtered_df[year_col].astype(str) == selected_year
-    ]
-
-if selected_location != "All" and location_col:
-    filtered_df = filtered_df[
-        filtered_df[location_col].astype(str) == selected_location
     ]
 
 if selected_periodicity != "All" and periodicity_col:
@@ -293,30 +343,25 @@ if selected_periodicity != "All" and periodicity_col:
     ]
 
 # ============================================================
-# DYNAMIC COLUMN VISIBILITY & HARDENED DATA EDITOR
+# DATA EDITOR
 # ============================================================
 
 st.subheader("📝 KPI Data Entry")
 
 if selected_periodicity == "All":
     st.info(
-        "🔒 **View-Only Mode**: Select a specific **Periodicity** above (e.g. Monthly, Quarterly, Semi-Annual, Annual) to enable data entry."
+        "🔒 **View-Only Mode**: Select a specific **Periodicity** above to enable data entry."
     )
-
     cols_to_display = list(filtered_df.columns)
     disabled_columns = list(filtered_df.columns)
     editable_columns = []
-
 else:
     valid_display_months = allowed_months(selected_periodicity)
-
-    cols_to_display = []
-    for col in filtered_df.columns:
-        if col in MONTH_COLUMNS:
-            if col in valid_display_months:
-                cols_to_display.append(col)
-        else:
-            cols_to_display.append(col)
+    cols_to_display = [
+        col
+        for col in filtered_df.columns
+        if col not in MONTH_COLUMNS or col in valid_display_months
+    ]
 
     editable_columns = [
         col
@@ -350,24 +395,38 @@ edited_df = st.data_editor(
     use_container_width=True,
     hide_index=True,
     num_rows="fixed",
-    key=f"editor_{selected_sheet}_{selected_periodicity}",
+    key=f"editor_{selected_sheet}_{selected_location}_{selected_periodicity}",
 )
 
 cleaned_df = clean_invalid_entries(edited_df)
 
 # ============================================================
-# SAVE CHANGES DIRECTLY BACK TO GOOGLE SHEETS
+# SECURE SAVE LOGIC
 # ============================================================
 
 if selected_periodicity != "All":
-    if st.button(f"💾 Save Changes - {selected_sheet}"):
-        original = sheets[selected_sheet].copy()
-        code_col = find_column(original, KPI_CODE_ALIASES)
+    if st.button(
+        f"💾 Save Changes for Location {selected_location}",
+        use_container_width=True,
+    ):
+        # Security Re-check
+        if (
+            "ALL" not in allowed_locations
+            and selected_location not in allowed_locations
+        ):
+            st.error("🚨 Security Alert: Unauthorized location save attempt!")
+            st.stop()
+
+        master_df = sheets[selected_sheet].copy()
+        code_col = find_column(master_df, KPI_CODE_ALIASES)
 
         if code_col:
             for idx, row in cleaned_df.iterrows():
                 kpi_code = str(row[code_col])
-                mask = original[code_col].astype(str) == kpi_code
+                # Dual Key Match (KPI Code + Location)
+                mask = (master_df[code_col].astype(str) == kpi_code) & (
+                    master_df[location_col].astype(str) == selected_location
+                )
 
                 if mask.any():
                     row_periodicity = get_value(row, FREQUENCY_ALIASES, "M")
@@ -382,18 +441,17 @@ if selected_periodicity != "All":
                             ):
                                 val = np.nan
 
-                            original.loc[mask, col] = (
+                            master_df.loc[mask, col] = (
                                 np.nan if pd.isna(val) else val
                             )
-        else:
-            original = cleaned_df.copy()
 
-        original = clean_invalid_entries(original)
-        st.session_state["kpi_sheets"][selected_sheet] = original
+        master_df = clean_invalid_entries(master_df)
+        st.session_state["kpi_sheets"][selected_sheet] = master_df
 
-        # Write directly to Google Sheets
-        with st.spinner("Saving directly to Google Sheets..."):
-            save_sheet_to_google(SPREADSHEET_ID, selected_sheet, original)
+        with st.spinner("Saving changes directly to Google Sheets..."):
+            save_sheet_to_google(SPREADSHEET_ID, selected_sheet, master_df)
 
-        st.success(f"Changes saved successfully to Google Sheets!")
+        st.success(
+            f"Successfully saved updates for Location `{selected_location}`!"
+        )
         st.rerun()
