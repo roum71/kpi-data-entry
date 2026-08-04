@@ -17,7 +17,7 @@ st.set_page_config(
 )
 
 # ============================================================
-# GOOGLE OAUTH CONFIGURATION
+# OAUTH & GOOGLE SHEETS CONSTANTS
 # ============================================================
 
 CLIENT_ID = st.secrets["oauth2"]["client_id"]
@@ -27,100 +27,13 @@ TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke"
 REDIRECT_URI = "https://kpientry.streamlit.app/"
 
-if "token" not in st.session_state:
-    st.session_state["token"] = None
-
-# AUTHENTICATION GUARD: Render login before executing any data calls
-if not st.session_state["token"]:
-    st.title("🔒 KPI Data Entry System")
-    st.caption("Multi-sheet KPI data entry with secure access control.")
-    st.info("Please sign in using your Google account to access your KPIs.")
-
-    # Clean residual parameters prior to mounting OAuth button
-    if "code" not in st.query_params and st.query_params:
-        st.query_params.clear()
-
-    oauth2 = OAuth2Component(
-        client_id=CLIENT_ID,
-        client_secret=CLIENT_SECRET,
-        authorize_endpoint=AUTHORIZE_ENDPOINT,
-        token_endpoint=TOKEN_ENDPOINT,
-        revoke_token_endpoint=REVOKE_ENDPOINT,
-    )
-
-    try:
-        result = oauth2.authorize_button(
-            name="Log in with Google",
-            icon="https://www.google.com/favicon.ico",
-            redirect_uri=REDIRECT_URI,
-            scope="openid email profile",
-            key="google_login",
-            use_container_width=True,
-        )
-
-        if result and "token" in result:
-            st.session_state["token"] = result["token"]
-            st.query_params.clear()
-            st.rerun()
-
-    except Exception:
-        st.query_params.clear()
-        st.session_state["token"] = None
-
-    st.stop()  # STOPS EXECUTION HERE UNTIL AUTHENTICATED
-
-# ============================================================
-# DECODE USER EMAIL
-# ============================================================
-
-def parse_jwt(token_str):
-    try:
-        parts = token_str.split(".")
-        if len(parts) > 1:
-            payload = parts[1]
-            padded = payload + "=" * (-len(payload) % 4)
-            return json.loads(base64.urlsafe_b64decode(padded))
-    except Exception:
-        pass
-    return {}
-
-token_data = st.session_state["token"]
-id_token = token_data.get("id_token", "") if isinstance(token_data, dict) else ""
-claims = parse_jwt(id_token)
-
-CURRENT_USER_EMAIL = claims.get("email", "").strip().lower()
-if not CURRENT_USER_EMAIL and isinstance(token_data, dict):
-    CURRENT_USER_EMAIL = token_data.get("email", "").strip().lower()
-
-if not CURRENT_USER_EMAIL:
-    st.error("⚠️ Failed to retrieve verified email from Google OAuth.")
-    if st.button("Clear Session & Retry"):
-        st.session_state["token"] = None
-        st.query_params.clear()
-        st.rerun()
-    st.stop()
-
-# Sidebar User Controls
-st.sidebar.markdown(f"👤 **Logged in as:**\n`{CURRENT_USER_EMAIL}`")
-if st.sidebar.button("🚪 Log Out"):
-    st.session_state["token"] = None
-    st.query_params.clear()
-    st.rerun()
-
-st.title("📊 KPI Data Entry System")
-st.caption("Multi-sheet KPI data entry with strict periodicity validation and live Google Sheets sync.")
-
-# ============================================================
-# CONSTANTS & CONFIGURATION
-# ============================================================
-
-MONTH_COLUMNS = [str(i) for i in range(1, 13)]
 SPREADSHEET_ID = "1Bsb7EiQ4-az1W12Xrmd6HVg9I4naB-JpBJQBkkdWYTs"
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
+MONTH_COLUMNS = [str(i) for i in range(1, 13)]
 YEAR_ALIASES = ["Year", "year", "السنة"]
 LOCATION_ALIASES = ["Location", "location", "Location Code", "location_code", "الموقع"]
 FREQUENCY_ALIASES = ["Periodicity", "periodicity", "Freq", "frequency", "Frequency", "التكرار"]
@@ -130,7 +43,7 @@ EVIDENCE_ALIASES = ["Evidence Status", "evidence_status", "Evidence", "evodence"
 COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
 
 # ============================================================
-# GOOGLE SHEETS CONNECTION & USER ACCESS CONTROL
+# HELPER FUNCTIONS & CACHED GOOGLE CONNECTION
 # ============================================================
 
 @st.cache_resource
@@ -139,39 +52,6 @@ def get_gspread_client():
         st.secrets["gcp_service_account"], scopes=SCOPES
     )
     return gspread.authorize(credentials)
-
-def load_user_permissions(spreadsheet_id, user_email):
-    client = get_gspread_client()
-    sh = client.open_by_key(spreadsheet_id)
-
-    try:
-        ws = sh.worksheet("User_Permissions")
-        perm_df = pd.DataFrame(ws.get_all_records())
-
-        if perm_df.empty:
-            st.error("User_Permissions sheet is empty!")
-            return [], "none"
-
-        user_row = perm_df[
-            perm_df["email"].astype(str).str.strip().str.lower() == user_email.strip().lower()
-        ]
-
-        if user_row.empty:
-            st.warning(f"User email `{user_email}` was not found in the `User_Permissions` sheet.")
-            return [], "none"
-
-        locs_raw = str(user_row.iloc[0]["locations"])
-        role = str(user_row.iloc[0].get("role", "user")).strip().lower()
-
-        if locs_raw.strip().upper() == "ALL" or role == "admin":
-            return ["ALL"], "admin"
-
-        allowed_locs = [l.strip() for l in locs_raw.split(",") if l.strip()]
-        return allowed_locs, role
-
-    except Exception as e:
-        st.error(f"Error accessing User_Permissions sheet: {e}")
-        return [], "none"
 
 def clean_header(col):
     if col is None:
@@ -191,6 +71,18 @@ def allowed_months(periodicity):
         return ["12"]
     return MONTH_COLUMNS
 
+def find_column(df, aliases):
+    for c in df.columns:
+        if c in aliases:
+            return c
+    return None
+
+def get_value(row, aliases, default=None):
+    for c in aliases:
+        if c in row.index and pd.notna(row[c]):
+            return row[c]
+    return default
+
 def clean_invalid_entries(df):
     df = df.copy()
     for m in MONTH_COLUMNS:
@@ -208,7 +100,8 @@ def clean_invalid_entries(df):
 
     return df
 
-def load_google_sheet_data(spreadsheet_id):
+@st.cache_data(ttl=60)
+def load_google_sheet_data_cached(spreadsheet_id):
     client = get_gspread_client()
     sh = client.open_by_key(spreadsheet_id)
     sheets = {}
@@ -246,51 +139,148 @@ def save_sheet_to_google(spreadsheet_id, sheet_name, df):
 
     ws.clear()
     ws.update("A1", full_data)
-
-def find_column(df, aliases):
-    for c in df.columns:
-        if c in aliases:
-            return c
-    return None
-
-def get_value(row, aliases, default=None):
-    for c in aliases:
-        if c in row.index and pd.notna(row[c]):
-            return row[c]
-    return default
+    st.cache_data.clear()
 
 # ============================================================
-# ACCESS CONTROL CHECK
+# GOOGLE OAUTH AUTHENTICATION STEP
 # ============================================================
+
+if "token" not in st.session_state:
+    st.session_state["token"] = None
+
+if not st.session_state["token"]:
+    st.title("🔒 KPI Data Entry System")
+    st.caption("Multi-sheet KPI data entry with secure access control.")
+    st.info("Please sign in using your Google account to access your KPIs.")
+
+    oauth2 = OAuth2Component(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        authorize_endpoint=AUTHORIZE_ENDPOINT,
+        token_endpoint=TOKEN_ENDPOINT,
+        revoke_token_endpoint=REVOKE_ENDPOINT,
+    )
+
+    try:
+        result = oauth2.authorize_button(
+            name="Log in with Google",
+            icon="https://www.google.com/favicon.ico",
+            redirect_uri=REDIRECT_URI,
+            scope="openid email profile",
+            key="google_auth",
+            use_container_width=True,
+        )
+
+        if result and "token" in result:
+            st.session_state["token"] = result["token"]
+            st.query_params.clear()
+            st.rerun()
+
+    except Exception as e:
+        st.error(f"Authentication Error: {e}")
+        st.session_state["token"] = None
+
+    st.stop()
+
+# ============================================================
+# EXTRACT USER INFO
+# ============================================================
+
+def parse_jwt(token_str):
+    try:
+        parts = token_str.split(".")
+        if len(parts) > 1:
+            payload = parts[1]
+            padded = payload + "=" * (-len(payload) % 4)
+            return json.loads(base64.urlsafe_b64decode(padded))
+    except Exception:
+        pass
+    return {}
+
+token_data = st.session_state["token"]
+id_token = token_data.get("id_token", "") if isinstance(token_data, dict) else ""
+claims = parse_jwt(id_token)
+
+CURRENT_USER_EMAIL = claims.get("email", "").strip().lower()
+if not CURRENT_USER_EMAIL and isinstance(token_data, dict):
+    CURRENT_USER_EMAIL = token_data.get("email", "").strip().lower()
+
+if not CURRENT_USER_EMAIL:
+    st.error("⚠️ Failed to verify Google Email.")
+    if st.button("Retry Sign In"):
+        st.session_state["token"] = None
+        st.query_params.clear()
+        st.rerun()
+    st.stop()
+
+# Sidebar User Info
+st.sidebar.markdown(f"👤 **User:** `{CURRENT_USER_EMAIL}`")
+if st.sidebar.button("🚪 Log Out"):
+    st.session_state["token"] = None
+    st.query_params.clear()
+    st.rerun()
+
+# ============================================================
+# FETCH PERMISSIONS DIRECTLY
+# ============================================================
+
+def load_user_permissions(spreadsheet_id, user_email):
+    client = get_gspread_client()
+    sh = client.open_by_key(spreadsheet_id)
+    ws = sh.worksheet("User_Permissions")
+    perm_df = pd.DataFrame(ws.get_all_records())
+
+    if perm_df.empty:
+        return [], "none"
+
+    user_row = perm_df[
+        perm_df["email"].astype(str).str.strip().str.lower() == user_email.strip().lower()
+    ]
+
+    if user_row.empty:
+        return [], "none"
+
+    locs_raw = str(user_row.iloc[0]["locations"])
+    role = str(user_row.iloc[0].get("role", "user")).strip().lower()
+
+    if locs_raw.strip().upper() == "ALL" or role == "admin":
+        return ["ALL"], "admin"
+
+    allowed_locs = [l.strip() for l in locs_raw.split(",") if l.strip()]
+    return allowed_locs, role
 
 allowed_locations, user_role = load_user_permissions(SPREADSHEET_ID, CURRENT_USER_EMAIL)
 
 if not allowed_locations:
-    st.error(f"⛔ Access Denied: User `{CURRENT_USER_EMAIL}` is not authorized to access any location.")
-    st.info("Please add this email to the `User_Permissions` sheet tab in Google Sheets.")
+    st.error(f"⛔ Access Denied for `{CURRENT_USER_EMAIL}`.")
+    st.warning("Your email is not authorized in the `User_Permissions` Google Sheet tab.")
     st.stop()
 
 st.sidebar.markdown(f"🔑 **Role:** `{user_role.upper()}`")
 st.sidebar.markdown(f"📍 **Locations:** `{', '.join(allowed_locations)}`")
 
 # ============================================================
-# MAIN APPLICATION LOGIC
+# MAIN APPLICATION PAGE
 # ============================================================
 
-if "kpi_sheets" not in st.session_state:
-    with st.spinner("Fetching KPI Data..."):
-        st.session_state["kpi_sheets"] = load_google_sheet_data(SPREADSHEET_ID)
+st.title("📊 KPI Data Entry System")
+st.caption("Multi-sheet KPI data entry with live Google Sheets sync.")
 
-sheets = st.session_state["kpi_sheets"]
+with st.spinner("Loading KPI Sheets from Google..."):
+    sheets = load_google_sheet_data_cached(SPREADSHEET_ID)
+
+if "kpi_sheets" not in st.session_state:
+    st.session_state["kpi_sheets"] = sheets
+
 available_sheets = list(sheets.keys())
 selected_sheet = st.selectbox("Select Entry Sheet", available_sheets)
 
-df = sheets[selected_sheet].copy()
+df = st.session_state["kpi_sheets"][selected_sheet].copy()
 df.columns = [str(c).strip() for c in df.columns]
 
 location_col = find_column(df, LOCATION_ALIASES)
 if not location_col:
-    st.error("Sheet does not contain a valid Location column!")
+    st.error("Sheet missing valid Location column!")
     st.stop()
 
 if "ALL" in allowed_locations:
@@ -303,7 +293,7 @@ if authorized_df.empty:
     st.stop()
 
 # ============================================================
-# FILTERS & DATA ENTRY
+# DATA ENTRY & SAVE
 # ============================================================
 
 st.subheader("🔎 Filters")
@@ -311,11 +301,8 @@ c1, c2, c3 = st.columns(3)
 
 with c1:
     year_col = find_column(authorized_df, YEAR_ALIASES)
-    if year_col:
-        years = sorted(authorized_df[year_col].dropna().astype(str).unique())
-        selected_year = st.selectbox("Year", ["All"] + years)
-    else:
-        selected_year = "All"
+    years = sorted(authorized_df[year_col].dropna().astype(str).unique()) if year_col else []
+    selected_year = st.selectbox("Year", ["All"] + years) if year_col else "All"
 
 with c2:
     locations = sorted(authorized_df[location_col].dropna().astype(str).unique())
@@ -323,11 +310,8 @@ with c2:
 
 with c3:
     periodicity_col = find_column(authorized_df, FREQUENCY_ALIASES)
-    if periodicity_col:
-        frequencies = sorted(authorized_df[periodicity_col].dropna().astype(str).unique())
-        selected_periodicity = st.selectbox("Periodicity", ["All"] + frequencies)
-    else:
-        selected_periodicity = "All"
+    frequencies = sorted(authorized_df[periodicity_col].dropna().astype(str).unique()) if periodicity_col else []
+    selected_periodicity = st.selectbox("Periodicity", ["All"] + frequencies) if periodicity_col else "All"
 
 filtered_df = authorized_df[authorized_df[location_col].astype(str) == selected_location].copy()
 
@@ -384,7 +368,7 @@ if selected_periodicity != "All":
             st.error("🚨 Security Alert: Unauthorized location save attempt!")
             st.stop()
 
-        master_df = sheets[selected_sheet].copy()
+        master_df = st.session_state["kpi_sheets"][selected_sheet].copy()
         code_col = find_column(master_df, KPI_CODE_ALIASES)
 
         if code_col:
