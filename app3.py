@@ -48,12 +48,20 @@ COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
 
 @st.cache_resource
 def get_gspread_client():
-    # Load secrets into a dict
+    # Convert st.secrets to a standard dictionary
     info = dict(st.secrets["gcp_service_account"])
     
-    # Fix escaped newlines and ensure string format
-    key = str(info["private_key"]).replace("\\n", "\n").strip()
-    info["private_key"] = key
+    # Normalize private key line breaks regardless of TOML formatting
+    pk = str(info["private_key"])
+    pk = pk.replace("\\n", "\n").strip()
+    
+    # Ensure standard quotes or multiline strings are formatted correctly
+    if not pk.startswith("-----BEGIN PRIVATE KEY-----"):
+        pk = "-----BEGIN PRIVATE KEY-----\n" + pk
+    if not pk.endswith("-----END PRIVATE KEY-----"):
+        pk = pk + "\n-----END PRIVATE KEY-----"
+        
+    info["private_key"] = pk
 
     credentials = Credentials.from_service_account_info(
         info, scopes=SCOPES
