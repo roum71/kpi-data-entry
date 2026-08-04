@@ -27,7 +27,7 @@ if not is_logged_in:
     st.caption("Multi-sheet KPI data entry with secure access control.")
     st.info("Please sign in using your Google account to access your KPIs.")
     if st.button("🔑 Log in with Google", use_container_width=True):
-        st.login("google")
+        st.login()  # <-- REMOVE "google" ARGUMENT HERE
     st.stop()
 
 # Retrieve verified Google Email from the session
