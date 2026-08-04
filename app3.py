@@ -46,34 +46,51 @@ COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
 # HELPER FUNCTIONS & CACHED GOOGLE CONNECTION
 # ============================================================
 
+import re
+
 @st.cache_resource
 def get_gspread_client():
     info = dict(st.secrets["gcp_service_account"])
     
-    # Extract and normalize the private key string to handle all TOML escaping variations
-    pk = str(info["private_key"])
+    pk = info.get("private_key", "")
+    if isinstance(pk, bytes):
+        pk = pk.decode("utf-8")
+    else:
+        pk = str(pk)
+    
+    # Replace literal \n with actual newlines
     pk = pk.replace("\\n", "\n")
     
-    if "BEGIN PRIVATE KEY" in pk and not pk.startswith("-----BEGIN PRIVATE KEY-----"):
-        parts = pk.split("-----BEGIN PRIVATE KEY-----")
-        pk = "-----BEGIN PRIVATE KEY-----" + parts[-1]
-    if "END PRIVATE KEY" in pk and not pk.endswith("-----END PRIVATE KEY-----"):
-        parts = pk.split("-----END PRIVATE KEY-----")
-        pk = parts[0] + "-----END PRIVATE KEY-----"
-
-    credentials = service_account.Credentials.from_service_account_info(
-        {
-            "type": info.get("type", "service_account"),
-            "project_id": info.get("project_id"),
-            "private_key_id": info.get("private_key_id"),
-            "private_key": pk.strip(),
-            "client_email": info.get("client_email"),
-            "client_id": info.get("client_id"),
-            "token_uri": info.get("token_uri", "https://oauth2.googleapis.com/token"),
-        },
-        scopes=SCOPES
+    # Extract clean PEM block
+    pem_match = re.search(
+        r"(-----BEGIN PRIVATE KEY-----.*?-----END PRIVATE KEY-----)",
+        pk,
+        re.DOTALL
     )
     
+    if not pem_match:
+        st.error("Private key not found in secrets. Check TOML formatting.")
+        st.stop()
+    
+    pk = pem_match.group(1)
+    pk = pk.replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.strip() for line in pk.split("\n") if line.strip()]
+    pk = "\n".join(lines)
+    
+    creds_info = {
+        "type": info.get("type", "service_account"),
+        "project_id": info.get("project_id"),
+        "private_key_id": info.get("private_key_id"),
+        "private_key": pk,
+        "client_email": info.get("client_email"),
+        "client_id": info.get("client_id"),
+        "auth_uri": info.get("auth_uri", "https://accounts.google.com/o/oauth2/auth"),
+        "token_uri": info.get("token_uri", "https://oauth2.googleapis.com/token"),
+    }
+    
+    credentials = service_account.Credentials.from_service_account_info(
+        creds_info, scopes=SCOPES
+    )
     return gspread.authorize(credentials)
 
 def clean_header(col):
