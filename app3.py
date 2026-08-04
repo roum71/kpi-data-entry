@@ -48,18 +48,17 @@ COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
 
 @st.cache_resource
 def get_gspread_client():
-    # Convert dict from st.secrets to a mutable dictionary
-    service_account_info = dict(st.secrets["gcp_service_account"])
+    # Load secrets into a dict
+    info = dict(st.secrets["gcp_service_account"])
     
-    # Replace escaped literal '\\n' strings with actual newline characters
-    if "private_key" in service_account_info:
-        service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-        
+    # Fix escaped newlines and ensure string format
+    key = str(info["private_key"]).replace("\\n", "\n").strip()
+    info["private_key"] = key
+
     credentials = Credentials.from_service_account_info(
-        service_account_info, scopes=SCOPES
+        info, scopes=SCOPES
     )
     return gspread.authorize(credentials)
-
 def clean_header(col):
     if col is None:
         return ""
