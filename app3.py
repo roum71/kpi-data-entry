@@ -14,9 +14,9 @@ st.set_page_config(
     page_title="KPI Data Entry System", page_icon="📊", layout="wide"
 )
 
-st.title("📊 KPI Data Entry System (Google Sheets)")
+st.title("📊 KPI Data Entry System")
 st.caption(
-    "Multi-sheet KPI data entry with strict periodicity validation and direct Google Sheets sync."
+    "Multi-sheet KPI data entry with strict periodicity validation and live Google Sheets sync."
 )
 
 # ============================================================
@@ -25,8 +25,8 @@ st.caption(
 
 MONTH_COLUMNS = [str(i) for i in range(1, 13)]
 
-# Paste your Google Sheet ID or URL here
-DEFAULT_SPREADSHEET_ID = "1Bsb7EiQ4-az1W12Xrmd6HVg9I4naB-JpBJQBkkdWYTs"
+# Hardcoded Google Sheet ID (Your actual Sheet ID)
+SPREADSHEET_ID = "1Bsb7EiQ4-az1W12Xrmd6HVg9I4naB-JpBJQBkkdWYTs"
 
 # Required OAuth Scopes for Google Sheets API
 SCOPES = [
@@ -83,7 +83,7 @@ def get_gspread_client():
 
 
 def load_google_sheet_data(spreadsheet_id):
-    """Loads all worksheets from the target Google Sheet into a dictionary of DataFrames."""
+    """Loads all worksheets from the Google Sheet into a dictionary of DataFrames."""
     client = get_gspread_client()
     sh = client.open_by_key(spreadsheet_id)
     sheets = {}
@@ -92,7 +92,6 @@ def load_google_sheet_data(spreadsheet_id):
         data = ws.get_all_values()
         if not data:
             continue
-        # Convert first row to header
         headers = [clean_header(c) for c in data[0]]
         df = pd.DataFrame(data[1:], columns=headers)
 
@@ -112,21 +111,18 @@ def load_google_sheet_data(spreadsheet_id):
 
 
 def save_sheet_to_google(spreadsheet_id, sheet_name, df):
-    """Writes the updated DataFrame back to the EXACT same Google Sheet tab."""
+    """Writes the updated DataFrame directly back to the Google Sheet tab."""
     client = get_gspread_client()
     sh = client.open_by_key(spreadsheet_id)
     ws = sh.worksheet(sheet_name)
 
-    # Convert NaN back to empty strings for Google Sheets presentation
     clean_df = df.copy()
     clean_df = clean_df.fillna("")
 
-    # Prepare values array including header
     header = clean_df.columns.values.tolist()
     data = clean_df.values.tolist()
     full_data = [header] + data
 
-    # Clear worksheet and write new data
     ws.clear()
     ws.update("A1", full_data)
 
@@ -221,196 +217,183 @@ def clean_invalid_entries(df):
 
 
 # ============================================================
-# MAIN APPLICATION
+# MAIN APPLICATION LOGIC
 # ============================================================
 
-st.sidebar.header("🔑 Google Sheet Connection")
-spreadsheet_id = st.sidebar.text_input("Spreadsheet ID", DEFAULT_SPREADSHEET_ID)
+# Auto-load data on application launch
+if "kpi_sheets" not in st.session_state:
+    with st.spinner("Connecting to Google Sheets..."):
+        st.session_state["kpi_sheets"] = load_google_sheet_data(SPREADSHEET_ID)
 
-if st.sidebar.button("🔄 Reload Data from Google Sheet") or "kpi_sheets" not in st.session_state:
-    if spreadsheet_id and spreadsheet_id != "YOUR_GOOGLE_SHEET_ID_HERE":
-        with st.spinner("Connecting to Google Sheet..."):
-            st.session_state["kpi_sheets"] = load_google_sheet_data(spreadsheet_id)
-            st.success("Loaded sheet successfully!")
+sheets = st.session_state["kpi_sheets"]
+
+# ============================================================
+# SELECT ENTRY SHEET
+# ============================================================
+
+available_sheets = list(sheets.keys())
+selected_sheet = st.selectbox("Select Entry Sheet", available_sheets)
+
+df = sheets[selected_sheet].copy()
+df.columns = [str(c).strip() for c in df.columns]
+df = clean_invalid_entries(df)
+
+# ============================================================
+# FILTERS
+# ============================================================
+
+st.subheader("🔎 Filters")
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    year_col = find_column(df, YEAR_ALIASES)
+    if year_col:
+        years = sorted(df[year_col].dropna().astype(str).unique())
+        selected_year = st.selectbox("Year", ["All"] + years)
     else:
-        st.warning("Please provide a valid Google Sheet ID in the sidebar.")
+        selected_year = "All"
 
-if "kpi_sheets" in st.session_state:
-    sheets = st.session_state["kpi_sheets"]
+with c2:
+    location_col = find_column(df, LOCATION_ALIASES)
+    if location_col:
+        locations = sorted(df[location_col].dropna().astype(str).unique())
+        selected_location = st.selectbox("Location", ["All"] + locations)
+    else:
+        selected_location = "All"
 
-    # ========================================================
-    # SELECT ENTRY SHEET
-    # ========================================================
-
-    available_sheets = list(sheets.keys())
-    selected_sheet = st.selectbox("Select Entry Sheet", available_sheets)
-
-    df = sheets[selected_sheet].copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    df = clean_invalid_entries(df)
-
-    # ========================================================
-    # FILTERS
-    # ========================================================
-
-    st.subheader("🔎 Filters")
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        year_col = find_column(df, YEAR_ALIASES)
-        if year_col:
-            years = sorted(df[year_col].dropna().astype(str).unique())
-            selected_year = st.selectbox("Year", ["All"] + years)
-        else:
-            selected_year = "All"
-
-    with c2:
-        location_col = find_column(df, LOCATION_ALIASES)
-        if location_col:
-            locations = sorted(df[location_col].dropna().astype(str).unique())
-            selected_location = st.selectbox("Location", ["All"] + locations)
-        else:
-            selected_location = "All"
-
-    with c3:
-        periodicity_col = find_column(df, FREQUENCY_ALIASES)
-        if periodicity_col:
-            frequencies = sorted(
-                df[periodicity_col].dropna().astype(str).unique()
-            )
-            selected_periodicity = st.selectbox(
-                "Periodicity", ["All"] + frequencies
-            )
-        else:
-            selected_periodicity = "All"
-
-    # ========================================================
-    # APPLY FILTERS
-    # ========================================================
-
-    filtered_df = df.copy()
-
-    if selected_year != "All" and year_col:
-        filtered_df = filtered_df[
-            filtered_df[year_col].astype(str) == selected_year
-        ]
-
-    if selected_location != "All" and location_col:
-        filtered_df = filtered_df[
-            filtered_df[location_col].astype(str) == selected_location
-        ]
-
-    if selected_periodicity != "All" and periodicity_col:
-        filtered_df = filtered_df[
-            filtered_df[periodicity_col].astype(str) == selected_periodicity
-        ]
-
-    # ========================================================
-    # DYNAMIC COLUMN VISIBILITY & HARDENED DATA EDITOR
-    # ========================================================
-
-    st.subheader("📝 KPI Data Entry")
-
-    if selected_periodicity == "All":
-        st.info(
-            "🔒 **View-Only Mode**: Select a specific **Periodicity** above (e.g. Monthly, Quarterly, Semi-Annual, Annual) to enable data entry."
+with c3:
+    periodicity_col = find_column(df, FREQUENCY_ALIASES)
+    if periodicity_col:
+        frequencies = sorted(df[periodicity_col].dropna().astype(str).unique())
+        selected_periodicity = st.selectbox(
+            "Periodicity", ["All"] + frequencies
         )
-
-        cols_to_display = list(filtered_df.columns)
-        disabled_columns = list(filtered_df.columns)
-        editable_columns = []
-
     else:
-        valid_display_months = allowed_months(selected_periodicity)
+        selected_periodicity = "All"
 
-        cols_to_display = []
-        for col in filtered_df.columns:
-            if col in MONTH_COLUMNS:
-                if col in valid_display_months:
-                    cols_to_display.append(col)
-            else:
-                cols_to_display.append(col)
+# ============================================================
+# APPLY FILTERS
+# ============================================================
 
-        editable_columns = [
-            col
-            for col in cols_to_display
-            if col in MONTH_COLUMNS
-            or col in EVIDENCE_ALIASES
-            or col in COMMENT_ALIASES
-        ]
-        disabled_columns = [
-            col for col in cols_to_display if col not in editable_columns
-        ]
+filtered_df = df.copy()
 
-    filtered_df = filtered_df[cols_to_display]
-    filtered_df = clean_invalid_entries(filtered_df)
+if selected_year != "All" and year_col:
+    filtered_df = filtered_df[
+        filtered_df[year_col].astype(str) == selected_year
+    ]
 
-    column_config = {}
-    for col in filtered_df.columns:
-        if col in MONTH_COLUMNS:
-            column_config[col] = st.column_config.NumberColumn(
-                col, format="%g", help="Numeric KPI value only"
-            )
-        elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
-            column_config[col] = st.column_config.TextColumn(
-                col, help="Editable text field"
-            )
+if selected_location != "All" and location_col:
+    filtered_df = filtered_df[
+        filtered_df[location_col].astype(str) == selected_location
+    ]
 
-    edited_df = st.data_editor(
-        filtered_df,
-        column_config=column_config,
-        disabled=disabled_columns,
-        use_container_width=True,
-        hide_index=True,
-        num_rows="fixed",
-        key=f"editor_{selected_sheet}_{selected_periodicity}",
+if selected_periodicity != "All" and periodicity_col:
+    filtered_df = filtered_df[
+        filtered_df[periodicity_col].astype(str) == selected_periodicity
+    ]
+
+# ============================================================
+# DYNAMIC COLUMN VISIBILITY & HARDENED DATA EDITOR
+# ============================================================
+
+st.subheader("📝 KPI Data Entry")
+
+if selected_periodicity == "All":
+    st.info(
+        "🔒 **View-Only Mode**: Select a specific **Periodicity** above (e.g. Monthly, Quarterly, Semi-Annual, Annual) to enable data entry."
     )
 
-    cleaned_df = clean_invalid_entries(edited_df)
+    cols_to_display = list(filtered_df.columns)
+    disabled_columns = list(filtered_df.columns)
+    editable_columns = []
 
-    # ========================================================
-    # SAVE CHANGES DIRECTLY BACK TO GOOGLE SHEETS
-    # ========================================================
+else:
+    valid_display_months = allowed_months(selected_periodicity)
 
-    if selected_periodicity != "All":
-        if st.button(f"💾 Sync Changes to Google Sheet - {selected_sheet}"):
-            original = sheets[selected_sheet].copy()
-            code_col = find_column(original, KPI_CODE_ALIASES)
+    cols_to_display = []
+    for col in filtered_df.columns:
+        if col in MONTH_COLUMNS:
+            if col in valid_display_months:
+                cols_to_display.append(col)
+        else:
+            cols_to_display.append(col)
 
-            if code_col:
-                for idx, row in cleaned_df.iterrows():
-                    kpi_code = str(row[code_col])
-                    mask = original[code_col].astype(str) == kpi_code
+    editable_columns = [
+        col
+        for col in cols_to_display
+        if col in MONTH_COLUMNS
+        or col in EVIDENCE_ALIASES
+        or col in COMMENT_ALIASES
+    ]
+    disabled_columns = [
+        col for col in cols_to_display if col not in editable_columns
+    ]
 
-                    if mask.any():
-                        row_periodicity = get_value(
-                            row, FREQUENCY_ALIASES, "M"
-                        )
-                        valid_m_for_row = allowed_months(row_periodicity)
+filtered_df = filtered_df[cols_to_display]
+filtered_df = clean_invalid_entries(filtered_df)
 
-                        for col in editable_columns:
-                            if col in cleaned_df.columns:
-                                val = row[col]
-                                if (
-                                    col in MONTH_COLUMNS
-                                    and col not in valid_m_for_row
-                                ):
-                                    val = np.nan
+column_config = {}
+for col in filtered_df.columns:
+    if col in MONTH_COLUMNS:
+        column_config[col] = st.column_config.NumberColumn(
+            col, format="%g", help="Numeric KPI value only"
+        )
+    elif col in EVIDENCE_ALIASES or col in COMMENT_ALIASES:
+        column_config[col] = st.column_config.TextColumn(
+            col, help="Editable text field"
+        )
 
-                                original.loc[mask, col] = (
-                                    np.nan if pd.isna(val) else val
-                                )
-            else:
-                original = cleaned_df.copy()
+edited_df = st.data_editor(
+    filtered_df,
+    column_config=column_config,
+    disabled=disabled_columns,
+    use_container_width=True,
+    hide_index=True,
+    num_rows="fixed",
+    key=f"editor_{selected_sheet}_{selected_periodicity}",
+)
 
-            original = clean_invalid_entries(original)
-            st.session_state["kpi_sheets"][selected_sheet] = original
+cleaned_df = clean_invalid_entries(edited_df)
 
-            # Write updated sheet to Google Sheet source
-            with st.spinner("Writing directly to Google Sheet..."):
-                save_sheet_to_google(spreadsheet_id, selected_sheet, original)
+# ============================================================
+# SAVE CHANGES DIRECTLY BACK TO GOOGLE SHEETS
+# ============================================================
 
-            st.success(
-                f"Changes saved live to Google Sheet for tab '{selected_sheet}'!"
-            )
-            st.rerun()
+if selected_periodicity != "All":
+    if st.button(f"💾 Save Changes - {selected_sheet}"):
+        original = sheets[selected_sheet].copy()
+        code_col = find_column(original, KPI_CODE_ALIASES)
+
+        if code_col:
+            for idx, row in cleaned_df.iterrows():
+                kpi_code = str(row[code_col])
+                mask = original[code_col].astype(str) == kpi_code
+
+                if mask.any():
+                    row_periodicity = get_value(row, FREQUENCY_ALIASES, "M")
+                    valid_m_for_row = allowed_months(row_periodicity)
+
+                    for col in editable_columns:
+                        if col in cleaned_df.columns:
+                            val = row[col]
+                            if (
+                                col in MONTH_COLUMNS
+                                and col not in valid_m_for_row
+                            ):
+                                val = np.nan
+
+                            original.loc[mask, col] = (
+                                np.nan if pd.isna(val) else val
+                            )
+        else:
+            original = cleaned_df.copy()
+
+        original = clean_invalid_entries(original)
+        st.session_state["kpi_sheets"][selected_sheet] = original
+
+        # Write directly to Google Sheets
+        with st.spinner("Saving directly to Google Sheets..."):
+            save_sheet_to_google(SPREADSHEET_ID, selected_sheet, original)
+
+        st.success(f"Changes saved successfully to Google Sheets!")
+        st.rerun()
