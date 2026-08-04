@@ -17,8 +17,12 @@ st.set_page_config(
 # ============================================================
 # GOOGLE OAUTH AUTHENTICATION (OPTION 1)
 # ============================================================
+# Handle both stable (st.user) and experimental (st.experimental_user) APIs safely
+user_info = getattr(st, "user", None) or getattr(
+    st, "experimental_user", None
+)
 
-if not st.experimental_user.is_logged_in:
+if not user_info or not user_info.is_logged_in:
     st.title("🔒 KPI Data Entry System")
     st.caption("Multi-sheet KPI data entry with secure access control.")
     st.info("Please sign in using your Google account to access your KPIs.")
@@ -27,13 +31,15 @@ if not st.experimental_user.is_logged_in:
     st.stop()
 
 # Retrieve verified Google Email from the session
-CURRENT_USER_EMAIL = st.experimental_user.email
+CURRENT_USER_EMAIL = user_info.email
 
 # Sidebar User Info & Logout
 st.sidebar.markdown(f"👤 **Logged in as:**\n`{CURRENT_USER_EMAIL}`")
 if st.sidebar.button("🚪 Log Out"):
     st.logout()
     st.rerun()
+
+
 
 st.title("📊 KPI Data Entry System")
 st.caption(
