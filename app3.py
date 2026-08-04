@@ -5,7 +5,7 @@ import gspread
 import numpy as np
 import pandas as pd
 import streamlit as st
-from google.oauth2.service_account import Credentials
+from google.oauth2 import service_account
 from streamlit_oauth import OAuth2Component
 
 # ============================================================
@@ -52,11 +52,8 @@ def get_gspread_client():
     
     # Extract and normalize the private key string to handle all TOML escaping variations
     pk = str(info["private_key"])
-    
-    # Replace literal escape sequences with real newlines
     pk = pk.replace("\\n", "\n")
     
-    # Ensure proper PEM header/footer spacing
     if "BEGIN PRIVATE KEY" in pk and not pk.startswith("-----BEGIN PRIVATE KEY-----"):
         parts = pk.split("-----BEGIN PRIVATE KEY-----")
         pk = "-----BEGIN PRIVATE KEY-----" + parts[-1]
@@ -78,6 +75,7 @@ def get_gspread_client():
     )
     
     return gspread.authorize(credentials)
+
 def clean_header(col):
     if col is None:
         return ""
