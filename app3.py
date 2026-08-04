@@ -46,25 +46,21 @@ COMMENT_ALIASES = ["Comments", "Comment", "comments", "ملاحظات"]
 # HELPER FUNCTIONS & CACHED GOOGLE CONNECTION
 # ============================================================
 
+import json
+from google.oauth2 import service_account
+
 @st.cache_resource
 def get_gspread_client():
-    # Convert st.secrets to a standard dictionary
-    info = dict(st.secrets["gcp_service_account"])
+    # Pull raw secrets dict
+    secrets_dict = dict(st.secrets["gcp_service_account"])
     
-    # Normalize private key line breaks regardless of TOML formatting
-    pk = str(info["private_key"])
-    pk = pk.replace("\\n", "\n").strip()
-    
-    # Ensure standard quotes or multiline strings are formatted correctly
-    if not pk.startswith("-----BEGIN PRIVATE KEY-----"):
-        pk = "-----BEGIN PRIVATE KEY-----\n" + pk
-    if not pk.endswith("-----END PRIVATE KEY-----"):
-        pk = pk + "\n-----END PRIVATE KEY-----"
-        
-    info["private_key"] = pk
+    # Ensure the private key has real newlines restored
+    if "private_key" in secrets_dict:
+        secrets_dict["private_key"] = secrets_dict["private_key"].replace("\\n", "\n")
 
-    credentials = Credentials.from_service_account_info(
-        info, scopes=SCOPES
+    # Load credentials using service_account module directly from dict
+    credentials = service_account.Credentials.from_service_account_info(
+        secrets_dict, scopes=SCOPES
     )
     return gspread.authorize(credentials)
 def clean_header(col):
