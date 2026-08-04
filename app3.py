@@ -35,37 +35,48 @@ oauth2 = OAuth2Component(
     revoke_token_endpoint=REVOKE_ENDPOINT,
 )
 
+
+# Around lines 35 to 70 in app3.py
 if "token" not in st.session_state:
     st.session_state["token"] = None
 
-# AUTHENTICATION GUARD (FAST LOAD)
 if not st.session_state["token"]:
     st.title("🔒 KPI Data Entry System")
     st.caption("Multi-sheet KPI data entry with secure access control.")
     st.info("Please sign in using your Google account to access your KPIs.")
 
+    # 1. READ URL PARAMETERS BEFORE CALLING AUTHORIZE_BUTTON
+    query_params = st.query_params
+
+    # If user arrives with a stale or invalid state/error in URL, wipe it clean first
+    if "error" in query_params or ("state" in query_params and "code" not in query_params):
+        st.query_params.clear()
+        st.rerun()
+
+    # 2. RENDER OAUTH BUTTON
     try:
         result = oauth2.authorize_button(
             name="Log in with Google",
             icon="https://www.google.com/favicon.ico",
             redirect_uri=REDIRECT_URI,
             scope="openid email profile",
-            key="google",
+            key="google_login_btn",
             use_container_width=True,
         )
 
+        # 3. UPON SUCCESSFUL TOKEN RETURN, CLEAR URL PARAMS IMMEDIATELY
         if result and "token" in result:
             st.session_state["token"] = result["token"]
             st.query_params.clear()
             st.rerun()
 
-    except Exception:
-        st.warning("Session expired or code already used. Please sign in again.")
+    except Exception as e:
+        # If token exchange fails (e.g., re-used code), clear URL and force fresh state
         st.query_params.clear()
         st.session_state["token"] = None
+        st.rerun()
 
-    st.stop()  # STOPS EXECUTION HERE BEFORE CONNECTING TO GOOGLE SHEETS
-
+    st.stop()
 # DECODE VERIFIED USER EMAIL
 def parse_jwt(token_str):
     try:
